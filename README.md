@@ -6,10 +6,9 @@ Backend de `pixel.studio`, una aplicacion para crear, organizar y guardar recurs
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -e ".[dev]"
+.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
 Copy-Item .env.example .env
-fastapi dev app/main.py
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload
 ```
 
 Antes de iniciar la API, PostgreSQL debe estar disponible con la configuracion indicada en `.env`.
