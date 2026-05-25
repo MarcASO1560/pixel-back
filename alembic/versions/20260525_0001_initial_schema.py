@@ -25,6 +25,7 @@ resource_type = postgresql.ENUM(
     "music_track",
     "sound_effect",
     name="resourcetype",
+    create_type=False,
 )
 
 export_kind = postgresql.ENUM(
@@ -37,6 +38,7 @@ export_kind = postgresql.ENUM(
     "zip",
     "json",
     name="exportkind",
+    create_type=False,
 )
 
 
