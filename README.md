@@ -9,9 +9,10 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -e ".[dev]"
 Copy-Item .env.example .env
-docker compose up -d db
 fastapi dev app/main.py
 ```
+
+Antes de iniciar la API, PostgreSQL debe estar disponible con la configuracion indicada en `.env`.
 
 API local:
 
