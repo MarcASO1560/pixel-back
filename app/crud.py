@@ -8,6 +8,7 @@ from app.models import (
     Project,
     ProjectCreate,
     ProjectFolder,
+    ProjectFolderCreate,
     ProjectResource,
     ProjectTree,
     User,
@@ -31,6 +32,7 @@ def create_user(*, session: Session, user_create: UserCreate) -> User:
     user = User(
         email=user_create.email,
         display_name=user_create.display_name,
+        avatar_url=user_create.avatar_url,
         is_admin=user_create.is_admin,
     )
     session.add(user)
@@ -43,6 +45,7 @@ def get_or_create_user_from_api_key(*, session: Session, user_create: UserCreate
     user = get_user_by_email(session=session, email=user_create.email)
     if user:
         user.display_name = user_create.display_name
+        user.avatar_url = user_create.avatar_url
         user.is_admin = user_create.is_admin
         session.add(user)
         session.commit()
@@ -111,3 +114,27 @@ def get_project_tree(*, session: Session, owner_id: UUID, project_id: str) -> Pr
         folders=list(session.exec(folders_statement).all()),
         resources=list(session.exec(resources_statement).all()),
     )
+
+
+def create_project_folder(
+    *,
+    session: Session,
+    owner_id: UUID,
+    project_id: str,
+    folder_create: ProjectFolderCreate,
+) -> ProjectFolder:
+    project = get_project_or_404(session=session, owner_id=owner_id, project_id=project_id)
+
+    if folder_create.parent_id:
+        parent_folder = session.get(ProjectFolder, folder_create.parent_id)
+        if not parent_folder or parent_folder.project_id != project.id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Parent folder not found in this project",
+            )
+
+    folder = ProjectFolder.model_validate(folder_create, update={"project_id": project.id})
+    session.add(folder)
+    session.commit()
+    session.refresh(folder)
+    return folder

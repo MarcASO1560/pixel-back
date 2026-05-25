@@ -31,6 +31,7 @@ class ExportKind(StrEnum):
 class UserBase(SQLModel):
     email: EmailStr = Field(unique=True, index=True, max_length=255)
     display_name: str | None = Field(default=None, max_length=255)
+    avatar_url: str | None = Field(default=None, max_length=2048)
     is_admin: bool = False
 
 
@@ -101,6 +102,10 @@ class ProjectFolderBase(SQLModel):
     name: str = Field(min_length=1, max_length=255)
     color: str | None = Field(default=None, max_length=32)
     position: int = 0
+
+
+class ProjectFolderCreate(ProjectFolderBase):
+    parent_id: UUID | None = None
 
 
 class ProjectFolder(ProjectFolderBase, table=True):
