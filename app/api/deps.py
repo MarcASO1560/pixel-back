@@ -1,17 +1,17 @@
 from collections.abc import Generator
 from typing import Annotated
 
-from fastapi import Depends, Header, HTTPException, status
-from fastapi.security import OAuth2PasswordBearer
+from fastapi import Depends, HTTPException, status
+from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
 from jwt import InvalidTokenError
 from sqlmodel import Session
 
-from app.core.config import settings
 from app.core.db import engine
 from app.core.security import decode_access_token, verify_frontend_api_key
 from app.models import TokenPayload, User
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl=f"{settings.API_V1_STR}/auth/session")
+bearer_scheme = HTTPBearer()
+frontend_api_key_scheme = APIKeyHeader(name="X-API-Key")
 
 
 def get_db() -> Generator[Session]:
@@ -20,8 +20,8 @@ def get_db() -> Generator[Session]:
 
 
 SessionDep = Annotated[Session, Depends(get_db)]
-TokenDep = Annotated[str, Depends(oauth2_scheme)]
-FrontendApiKeyDep = Annotated[str, Header(alias="X-API-Key")]
+TokenDep = Annotated[HTTPAuthorizationCredentials, Depends(bearer_scheme)]
+FrontendApiKeyDep = Annotated[str, Depends(frontend_api_key_scheme)]
 
 
 def require_frontend_api_key(api_key: FrontendApiKeyDep) -> None:
@@ -35,9 +35,9 @@ def require_frontend_api_key(api_key: FrontendApiKeyDep) -> None:
 FrontendAuthDep = Annotated[None, Depends(require_frontend_api_key)]
 
 
-def get_current_user(session: SessionDep, token: TokenDep) -> User:
+def get_current_user(session: SessionDep, credentials: TokenDep) -> User:
     try:
-        payload = TokenPayload(**decode_access_token(token))
+        payload = TokenPayload(**decode_access_token(credentials.credentials))
     except (InvalidTokenError, ValueError):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
