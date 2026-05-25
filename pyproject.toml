@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pixel-studio-api"
+version = "0.1.0"
+description = "FastAPI backend for Pixel Studio"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "alembic>=1.13.0",
+  "email-validator>=2.2.0",
+  "fastapi[standard]>=0.115.0",
+  "passlib[bcrypt]>=1.7.4",
+  "psycopg[binary]>=3.2.0",
+  "pydantic-settings>=2.6.0",
+  "pyjwt>=2.9.0",
+  "sqlmodel>=0.0.22",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3.0",
+  "ruff>=0.8.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
