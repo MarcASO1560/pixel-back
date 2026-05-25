@@ -1,11 +1,18 @@
 from fastapi import APIRouter
 
 from app.api.deps import CurrentUser, SessionDep
-from app.crud import create_project, create_project_folder, get_project_tree, list_projects
+from app.crud import (
+    create_project,
+    create_project_folder,
+    get_project_tree,
+    list_projects,
+    update_project_folder,
+)
 from app.models import (
     ProjectCreate,
     ProjectFolderCreate,
     ProjectFolderPublic,
+    ProjectFolderUpdate,
     ProjectPublic,
     ProjectTree,
 )
@@ -48,4 +55,21 @@ def add_project_folder(
         owner_id=current_user.id,
         project_id=project_id,
         folder_create=folder_in,
+    )
+
+
+@router.patch("/{project_id}/folders/{folder_id}", response_model=ProjectFolderPublic)
+def edit_project_folder(
+    session: SessionDep,
+    current_user: CurrentUser,
+    project_id: str,
+    folder_id: str,
+    folder_in: ProjectFolderUpdate,
+) -> ProjectFolderPublic:
+    return update_project_folder(
+        session=session,
+        owner_id=current_user.id,
+        project_id=project_id,
+        folder_id=folder_id,
+        folder_update=folder_in,
     )

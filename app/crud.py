@@ -1,3 +1,4 @@
+from datetime import datetime
 from uuid import UUID
 
 from fastapi import HTTPException, status
@@ -9,6 +10,7 @@ from app.models import (
     ProjectCreate,
     ProjectFolder,
     ProjectFolderCreate,
+    ProjectFolderUpdate,
     ProjectResource,
     ProjectTree,
     User,
@@ -134,6 +136,39 @@ def create_project_folder(
             )
 
     folder = ProjectFolder.model_validate(folder_create, update={"project_id": project.id})
+    session.add(folder)
+    session.commit()
+    session.refresh(folder)
+    return folder
+
+
+def update_project_folder(
+    *,
+    session: Session,
+    owner_id: UUID,
+    project_id: str,
+    folder_id: str,
+    folder_update: ProjectFolderUpdate,
+) -> ProjectFolder:
+    project = get_project_or_404(session=session, owner_id=owner_id, project_id=project_id)
+
+    try:
+        parsed_folder_id = UUID(folder_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Folder not found",
+        ) from None
+
+    folder = session.get(ProjectFolder, parsed_folder_id)
+    if not folder or folder.project_id != project.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Folder not found")
+
+    folder_data = folder_update.model_dump(exclude_unset=True)
+    for field, value in folder_data.items():
+        setattr(folder, field, value)
+
+    folder.updated_at = datetime.utcnow()
     session.add(folder)
     session.commit()
     session.refresh(folder)

@@ -108,6 +108,12 @@ class ProjectFolderCreate(ProjectFolderBase):
     parent_id: UUID | None = None
 
 
+class ProjectFolderUpdate(SQLModel):
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    color: str | None = Field(default=None, max_length=32)
+    position: int | None = None
+
+
 class ProjectFolder(ProjectFolderBase, table=True):
     __tablename__ = "project_folders"
 
