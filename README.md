@@ -17,20 +17,20 @@ Para crear una sesion desde el frontend, llama a:
 
 ```text
 POST /api/v1/auth/session
-Header: X-API-Key: valor_de_FRONTEND_API_KEY
 ```
 
 Body:
 
 ```json
 {
+  "auth_token": "valor_de_FRONTEND_AUTH_TOKEN",
   "email": "admin@example.com",
   "display_name": "Admin",
   "is_admin": true
 }
 ```
 
-Todas las rutas privadas usan el mismo header `X-API-Key`.
+La respuesta devuelve un `access_token`. Ese token se usa en `Authorize` para el resto de rutas privadas.
 
 API local:
 

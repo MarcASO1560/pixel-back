@@ -46,6 +46,20 @@ class UserCreate(UserBase):
     pass
 
 
+class AuthSessionCreate(UserCreate):
+    auth_token: str = Field(min_length=1)
+
+
+class Token(SQLModel):
+    access_token: str
+    token_type: str = "bearer"
+
+
+class TokenPayload(SQLModel):
+    sub: UUID
+    exp: int | None = None
+
+
 class UserPublic(UserBase):
     id: UUID
     created_at: datetime

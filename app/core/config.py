@@ -19,7 +19,7 @@ class Settings(BaseSettings):
 
     SECRET_KEY: str = "change-this-secret-key"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7
-    FRONTEND_API_KEY: str = "change-this-frontend-api-key"
+    FRONTEND_AUTH_TOKEN: str = "change-this-frontend-auth-token"
     DEFAULT_USER_EMAIL: str = "admin@example.com"
     DEFAULT_USER_DISPLAY_NAME: str = "Admin"
     DEFAULT_USER_IS_ADMIN: bool = True
