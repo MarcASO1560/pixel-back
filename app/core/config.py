@@ -1,6 +1,15 @@
 from pydantic import AnyUrl, computed_field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+DEFAULT_CORS_ORIGINS = (
+    "http://localhost:4321",
+    "http://localhost:5173",
+    "http://127.0.0.1:4321",
+    "http://127.0.0.1:5173",
+    "https://pixelartstudio.app",
+    "https://www.pixelartstudio.app",
+)
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_ignore_empty=True, extra="ignore")
@@ -42,6 +51,10 @@ class Settings(BaseSettings):
 
     @property
     def all_cors_origins(self) -> list[str]:
+        origins = [*DEFAULT_CORS_ORIGINS, *self._configured_cors_origins()]
+        return list(dict.fromkeys(origin.rstrip("/") for origin in origins if origin))
+
+    def _configured_cors_origins(self) -> list[str]:
         if isinstance(self.BACKEND_CORS_ORIGINS, str):
             return [origin.strip() for origin in self.BACKEND_CORS_ORIGINS.split(",") if origin]
         return [str(origin).rstrip("/") for origin in self.BACKEND_CORS_ORIGINS]

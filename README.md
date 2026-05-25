@@ -34,11 +34,13 @@ Despues crea la base de datos `pixel_studio` si no existe y ejecuta las migracio
 En Vercel, configura solo estas variables:
 
 ```text
-BACKEND_CORS_ORIGINS="https://pixelartstudio.app,http://localhost:4321"
+BACKEND_CORS_ORIGINS="https://pixelartstudio.app,https://www.pixelartstudio.app,http://localhost:4321"
 DATABASE_URL="postgresql+psycopg://usuario:password@host:6543/postgres"
 SECRET_KEY="clave-larga-de-32-caracteres-o-mas"
 FRONTEND_AUTH_TOKEN="token-privado-que-tambien-usara-el-frontend"
 ```
+
+El backend ya permite por defecto `localhost`, `pixelartstudio.app` y `www.pixelartstudio.app`. `BACKEND_CORS_ORIGINS` solo hace falta si quieres sumar mas origenes.
 
 Para Supabase en Vercel, usa la conexion `Transaction pooler` del panel de Supabase. Vercel es serverless, y Supabase recomienda ese modo para funciones temporales. El backend ya usa `NullPool` para no abrir un pool extra encima del pooler de Supabase y desactiva prepared statements para ser compatible con el pooler de transacciones.
 
