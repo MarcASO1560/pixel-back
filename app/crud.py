@@ -4,7 +4,6 @@ from uuid import UUID
 from fastapi import HTTPException, status
 from sqlmodel import Session, select
 
-from app.core.config import settings
 from app.models import (
     Project,
     ProjectCreate,
@@ -56,15 +55,6 @@ def get_or_create_user_from_api_key(*, session: Session, user_create: UserCreate
         return user
 
     return create_user(session=session, user_create=user_create)
-
-
-def get_or_create_default_user(*, session: Session) -> User:
-    user_create = UserCreate(
-        email=settings.DEFAULT_USER_EMAIL,
-        display_name=settings.DEFAULT_USER_DISPLAY_NAME,
-        is_admin=settings.DEFAULT_USER_IS_ADMIN,
-    )
-    return get_or_create_user_from_api_key(session=session, user_create=user_create)
 
 
 def list_projects(*, session: Session, owner_id: UUID) -> list[Project]:
