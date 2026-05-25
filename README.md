@@ -13,6 +13,19 @@ Copy-Item .env.example .env
 
 Antes de iniciar la API, PostgreSQL debe estar disponible con la configuracion indicada en `.env`.
 
+Si tu usuario local de PostgreSQL no usa la password `postgres`, cambia este valor en `.env`:
+
+```text
+POSTGRES_PASSWORD="tu_password_real"
+```
+
+Despues crea la base de datos `pixel_studio` si no existe y ejecuta las migraciones:
+
+```powershell
+& "C:\Program Files\PostgreSQL\18\bin\createdb.exe" -U postgres pixel_studio
+.\.venv\Scripts\python.exe -m alembic upgrade head
+```
+
 Para crear una sesion desde el frontend, llama a:
 
 ```text
