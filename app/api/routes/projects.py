@@ -6,6 +6,7 @@ from app.crud import (
     create_project_folder,
     get_project_tree,
     list_projects,
+    update_project,
     update_project_folder,
 )
 from app.models import (
@@ -15,6 +16,7 @@ from app.models import (
     ProjectFolderUpdate,
     ProjectPublic,
     ProjectTree,
+    ProjectUpdate,
 )
 
 router = APIRouter()
@@ -32,6 +34,21 @@ def add_project(
     project_in: ProjectCreate,
 ) -> ProjectPublic:
     return create_project(session=session, owner_id=current_user.id, project_create=project_in)
+
+
+@router.patch("/{project_id}", response_model=ProjectPublic)
+def edit_project(
+    session: SessionDep,
+    current_user: CurrentUser,
+    project_id: str,
+    project_in: ProjectUpdate,
+) -> ProjectPublic:
+    return update_project(
+        session=session,
+        owner_id=current_user.id,
+        project_id=project_id,
+        project_update=project_in,
+    )
 
 
 @router.get("/{project_id}/tree", response_model=ProjectTree)

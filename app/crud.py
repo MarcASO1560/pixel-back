@@ -13,6 +13,7 @@ from app.models import (
     ProjectFolderUpdate,
     ProjectResource,
     ProjectTree,
+    ProjectUpdate,
     User,
     UserCreate,
 )
@@ -77,6 +78,26 @@ def list_projects(*, session: Session, owner_id: UUID) -> list[Project]:
 
 def create_project(*, session: Session, owner_id: UUID, project_create: ProjectCreate) -> Project:
     project = Project.model_validate(project_create, update={"owner_id": owner_id})
+    session.add(project)
+    session.commit()
+    session.refresh(project)
+    return project
+
+
+def update_project(
+    *,
+    session: Session,
+    owner_id: UUID,
+    project_id: str,
+    project_update: ProjectUpdate,
+) -> Project:
+    project = get_project_or_404(session=session, owner_id=owner_id, project_id=project_id)
+    project_data = project_update.model_dump(exclude_unset=True)
+
+    for field, value in project_data.items():
+        setattr(project, field, value)
+
+    project.updated_at = datetime.utcnow()
     session.add(project)
     session.commit()
     session.refresh(project)

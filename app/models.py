@@ -90,6 +90,13 @@ class ProjectCreate(ProjectBase):
     pass
 
 
+class ProjectUpdate(SQLModel):
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    description: str | None = None
+    settings: dict[str, Any] | None = None
+    thumbnail_url: str | None = None
+
+
 class ProjectPublic(ProjectBase):
     id: UUID
     owner_id: UUID
