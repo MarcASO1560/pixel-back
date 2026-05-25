@@ -13,6 +13,23 @@ Copy-Item .env.example .env
 
 Antes de iniciar la API, PostgreSQL debe estar disponible con la configuracion indicada en `.env`.
 
+Para crear una sesion desde el frontend, llama a:
+
+```text
+POST /api/v1/auth/session
+Header: X-API-Key: valor_de_FRONTEND_API_KEY
+```
+
+Body:
+
+```json
+{
+  "email": "admin@example.com",
+  "display_name": "Admin",
+  "is_admin": true
+}
+```
+
 API local:
 
 ```text

@@ -19,6 +19,7 @@ class Settings(BaseSettings):
 
     SECRET_KEY: str = "change-this-secret-key"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7
+    FRONTEND_API_KEY: str = "change-this-frontend-api-key"
 
     @computed_field
     @property

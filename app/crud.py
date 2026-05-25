@@ -3,7 +3,6 @@ from uuid import UUID
 from fastapi import HTTPException, status
 from sqlmodel import Session, select
 
-from app.core.security import get_password_hash
 from app.models import (
     Project,
     ProjectCreate,
@@ -31,12 +30,25 @@ def create_user(*, session: Session, user_create: UserCreate) -> User:
     user = User(
         email=user_create.email,
         display_name=user_create.display_name,
-        password_hash=get_password_hash(user_create.password),
+        is_admin=user_create.is_admin,
     )
     session.add(user)
     session.commit()
     session.refresh(user)
     return user
+
+
+def get_or_create_user_from_api_key(*, session: Session, user_create: UserCreate) -> User:
+    user = get_user_by_email(session=session, email=user_create.email)
+    if user:
+        user.display_name = user_create.display_name
+        user.is_admin = user_create.is_admin
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+        return user
+
+    return create_user(session=session, user_create=user_create)
 
 
 def list_projects(*, session: Session, owner_id: UUID) -> list[Project]:

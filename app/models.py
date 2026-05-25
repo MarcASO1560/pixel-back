@@ -41,19 +41,19 @@ class TokenPayload(SQLModel):
 class UserBase(SQLModel):
     email: EmailStr = Field(unique=True, index=True, max_length=255)
     display_name: str | None = Field(default=None, max_length=255)
+    is_admin: bool = False
 
 
 class User(UserBase, table=True):
     __tablename__ = "users"
 
     id: UUID = Field(default_factory=uuid4, primary_key=True)
-    password_hash: str
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 
 class UserCreate(UserBase):
-    password: str = Field(min_length=8, max_length=128)
+    pass
 
 
 class UserPublic(UserBase):

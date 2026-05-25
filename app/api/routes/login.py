@@ -1,30 +1,23 @@
 from datetime import timedelta
-from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordRequestForm
+from fastapi import APIRouter
 
-from app.api.deps import SessionDep
+from app.api.deps import FrontendAuthDep, SessionDep
 from app.core.config import settings
-from app.core.security import create_access_token, verify_password
-from app.crud import get_user_by_email
-from app.models import Token
+from app.core.security import create_access_token
+from app.crud import get_or_create_user_from_api_key
+from app.models import Token, UserCreate
 
 router = APIRouter()
 
 
-@router.post("/login", response_model=Token)
-def login_access_token(
+@router.post("/session", response_model=Token)
+def create_session(
     session: SessionDep,
-    form_data: Annotated[OAuth2PasswordRequestForm, Depends()],
+    _: FrontendAuthDep,
+    user_in: UserCreate,
 ) -> Token:
-    user = get_user_by_email(session=session, email=form_data.username)
-    if not user or not verify_password(form_data.password, user.password_hash):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Incorrect email or password",
-        )
-
+    user = get_or_create_user_from_api_key(session=session, user_create=user_in)
     access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     return Token(
         access_token=create_access_token(user.id, expires_delta=access_token_expires),

@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.api.deps import CurrentUser, SessionDep
+from app.api.deps import CurrentUser, FrontendAuthDep, SessionDep
 from app.crud import create_user
 from app.models import UserCreate, UserPublic
 
@@ -13,5 +13,5 @@ def read_current_user(current_user: CurrentUser) -> UserPublic:
 
 
 @router.post("/", response_model=UserPublic)
-def register_user(session: SessionDep, user_in: UserCreate) -> UserPublic:
+def register_user(session: SessionDep, _: FrontendAuthDep, user_in: UserCreate) -> UserPublic:
     return create_user(session=session, user_create=user_in)
