@@ -28,16 +28,6 @@ class ExportKind(StrEnum):
     json = "json"
 
 
-class Token(SQLModel):
-    access_token: str
-    token_type: str = "bearer"
-
-
-class TokenPayload(SQLModel):
-    sub: UUID
-    exp: int | None = None
-
-
 class UserBase(SQLModel):
     email: EmailStr = Field(unique=True, index=True, max_length=255)
     display_name: str | None = Field(default=None, max_length=255)

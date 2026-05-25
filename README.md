@@ -30,6 +30,8 @@ Body:
 }
 ```
 
+Todas las rutas privadas usan el mismo header `X-API-Key`.
+
 API local:
 
 ```text
