@@ -6,6 +6,8 @@ DEFAULT_CORS_ORIGINS = (
     "http://localhost:5173",
     "http://127.0.0.1:4321",
     "http://127.0.0.1:5173",
+    "https://sefkirastudio.com",
+    "https://www.sefkirastudio.com",
     "https://pixelartstudio.app",
     "https://www.pixelartstudio.app",
 )
@@ -30,6 +32,17 @@ class Settings(BaseSettings):
     SECRET_KEY: str = "change-this-secret-key"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7
     FRONTEND_AUTH_TOKEN: str = "change-this-frontend-auth-token"
+    FRONTEND_URL: str = "http://127.0.0.1:4321"
+    GOOGLE_CLIENT_ID: str | None = None
+    RESEND_API_KEY: str | None = None
+    RESEND_FROM_EMAIL: str = "Sefkira Studio <no-reply@sefkirastudio.com>"
+    SMTP_HOST: str | None = None
+    SMTP_PORT: int = 587
+    SMTP_USERNAME: str | None = None
+    SMTP_PASSWORD: str | None = None
+    SMTP_FROM_EMAIL: str | None = None
+    SMTP_FROM_NAME: str = "Sefkira Studio"
+    SMTP_USE_TLS: bool = True
 
     @computed_field
     @property

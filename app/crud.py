@@ -1,10 +1,20 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from uuid import UUID
 
 from fastapi import HTTPException, status
 from sqlmodel import Session, select
 
+from app.core.security import (
+    create_password_reset_token,
+    get_password_hash,
+    get_password_reset_token_hash,
+    verify_password,
+)
 from app.models import (
+    PasswordCredential,
+    PasswordResetConfirmCreate,
+    PasswordResetRequestCreate,
+    PasswordResetToken,
     Project,
     ProjectCreate,
     ProjectFolder,
@@ -15,11 +25,27 @@ from app.models import (
     ProjectUpdate,
     User,
     UserCreate,
+    UserRegistrationCreate,
 )
+
+PASSWORD_RESET_TOKEN_MINUTES = 30
+
+
+def normalize_email(email: str) -> str:
+    return email.strip().lower()
+
+
+def normalize_username(username: str) -> str:
+    return username.strip().lower()
 
 
 def get_user_by_email(*, session: Session, email: str) -> User | None:
-    statement = select(User).where(User.email == email)
+    statement = select(User).where(User.email == normalize_email(email))
+    return session.exec(statement).first()
+
+
+def get_user_by_username(*, session: Session, username: str) -> User | None:
+    statement = select(User).where(User.username == normalize_username(username))
     return session.exec(statement).first()
 
 
@@ -31,8 +57,16 @@ def create_user(*, session: Session, user_create: UserCreate) -> User:
             detail="A user with this email already exists",
         )
 
+    username = normalize_username(user_create.username) if user_create.username else None
+    if username and get_user_by_username(session=session, username=username):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="A user with this username already exists",
+        )
+
     user = User(
-        email=user_create.email,
+        username=username,
+        email=normalize_email(user_create.email),
         display_name=user_create.display_name,
         avatar_url=user_create.avatar_url,
         is_admin=user_create.is_admin,
@@ -43,18 +77,157 @@ def create_user(*, session: Session, user_create: UserCreate) -> User:
     return user
 
 
-def get_or_create_user_from_api_key(*, session: Session, user_create: UserCreate) -> User:
+def upsert_user_from_identity(*, session: Session, user_create: UserCreate) -> User:
     user = get_user_by_email(session=session, email=user_create.email)
     if user:
+        if user_create.username:
+            user.username = normalize_username(user_create.username)
         user.display_name = user_create.display_name
         user.avatar_url = user_create.avatar_url
         user.is_admin = user_create.is_admin
+        user.updated_at = datetime.utcnow()
         session.add(user)
         session.commit()
         session.refresh(user)
         return user
 
     return create_user(session=session, user_create=user_create)
+
+
+def get_or_create_user_from_api_key(*, session: Session, user_create: UserCreate) -> User:
+    return upsert_user_from_identity(session=session, user_create=user_create)
+
+
+def create_user_with_password(
+    *,
+    session: Session,
+    user_create: UserRegistrationCreate,
+) -> User:
+    if user_create.password != user_create.password_confirmation:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Passwords do not match",
+        )
+
+    username = normalize_username(user_create.username)
+    email = normalize_email(user_create.email)
+
+    if get_user_by_username(session=session, username=username):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="A user with this username already exists",
+        )
+
+    if get_user_by_email(session=session, email=email):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="A user with this email already exists",
+        )
+
+    user = User(
+        username=username,
+        email=email,
+        display_name=username,
+        is_admin=False,
+    )
+    session.add(user)
+    session.flush()
+
+    password_credential = PasswordCredential(
+        user_id=user.id,
+        password_hash=get_password_hash(user_create.password),
+    )
+    session.add(password_credential)
+    session.commit()
+    session.refresh(user)
+    return user
+
+
+def authenticate_user_with_password(
+    *,
+    session: Session,
+    email: str,
+    password: str,
+) -> User | None:
+    user = get_user_by_email(session=session, email=email)
+    if not user:
+        return None
+
+    password_credential = session.get(PasswordCredential, user.id)
+    if not password_credential:
+        return None
+
+    if not verify_password(password, password_credential.password_hash):
+        return None
+
+    return user
+
+
+def create_password_reset_request(
+    *,
+    session: Session,
+    reset_request: PasswordResetRequestCreate,
+) -> str | None:
+    user = get_user_by_email(session=session, email=reset_request.email)
+    if not user:
+        return None
+
+    token = create_password_reset_token()
+    reset_token = PasswordResetToken(
+        user_id=user.id,
+        token_hash=get_password_reset_token_hash(token),
+        expires_at=datetime.utcnow() + timedelta(minutes=PASSWORD_RESET_TOKEN_MINUTES),
+    )
+    session.add(reset_token)
+    session.commit()
+    return token
+
+
+def confirm_password_reset(
+    *,
+    session: Session,
+    reset_confirm: PasswordResetConfirmCreate,
+) -> User:
+    if reset_confirm.password != reset_confirm.password_confirmation:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Passwords do not match",
+        )
+
+    token_hash = get_password_reset_token_hash(reset_confirm.token)
+    statement = select(PasswordResetToken).where(PasswordResetToken.token_hash == token_hash)
+    reset_token = session.exec(statement).first()
+
+    if (
+        not reset_token
+        or reset_token.used_at is not None
+        or reset_token.expires_at <= datetime.utcnow()
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired reset token",
+        )
+
+    password_credential = session.get(PasswordCredential, reset_token.user_id)
+    if password_credential:
+        password_credential.password_hash = get_password_hash(reset_confirm.password)
+        password_credential.updated_at = datetime.utcnow()
+    else:
+        password_credential = PasswordCredential(
+            user_id=reset_token.user_id,
+            password_hash=get_password_hash(reset_confirm.password),
+        )
+
+    reset_token.used_at = datetime.utcnow()
+    session.add(password_credential)
+    session.add(reset_token)
+    session.commit()
+
+    user = session.get(User, reset_token.user_id)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    return user
 
 
 def list_projects(*, session: Session, owner_id: UUID) -> list[Project]:

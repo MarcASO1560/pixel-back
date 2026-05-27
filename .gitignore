@@ -15,6 +15,7 @@ ENV/
 .mypy_cache/
 .coverage
 htmlcov/
+*.log
 
 dist/
 build/

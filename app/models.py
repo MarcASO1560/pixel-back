@@ -3,7 +3,7 @@ from enum import StrEnum
 from typing import Any
 from uuid import UUID, uuid4
 
-from pydantic import EmailStr
+from pydantic import EmailStr, field_validator
 from sqlalchemy import Column
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
@@ -29,6 +29,7 @@ class ExportKind(StrEnum):
 
 
 class UserBase(SQLModel):
+    username: str | None = Field(default=None, index=True, max_length=40)
     email: EmailStr = Field(unique=True, index=True, max_length=255)
     display_name: str | None = Field(default=None, max_length=255)
     avatar_url: str | None = Field(default=None, max_length=2048)
@@ -51,6 +52,45 @@ class AuthSessionCreate(UserCreate):
     auth_token: str = Field(min_length=1)
 
 
+class GoogleAuthSessionCreate(SQLModel):
+    credential: str | None = Field(default=None, min_length=1)
+    access_token: str | None = Field(default=None, min_length=1)
+
+
+class EmailPasswordSessionCreate(SQLModel):
+    email: EmailStr
+    password: str = Field(min_length=8, max_length=128)
+
+
+class UserRegistrationCreate(SQLModel):
+    username: str = Field(min_length=3, max_length=40)
+    email: EmailStr
+    password: str = Field(min_length=8, max_length=128)
+    password_confirmation: str = Field(min_length=8, max_length=128)
+
+    @field_validator("username")
+    @classmethod
+    def validate_username(cls, username: str) -> str:
+        if not username.replace("_", "").isalnum():
+            raise ValueError("Username can only contain letters, numbers, and underscores")
+        return username
+
+
+class PasswordResetRequestCreate(SQLModel):
+    email: EmailStr
+
+
+class PasswordResetConfirmCreate(SQLModel):
+    token: str = Field(min_length=24, max_length=255)
+    password: str = Field(min_length=8, max_length=128)
+    password_confirmation: str = Field(min_length=8, max_length=128)
+
+
+class PasswordResetRequestPublic(SQLModel):
+    status: str
+    email_sent: bool = False
+
+
 class Token(SQLModel):
     access_token: str
     token_type: str = "bearer"
@@ -65,6 +105,26 @@ class UserPublic(UserBase):
     id: UUID
     created_at: datetime
     updated_at: datetime
+
+
+class PasswordCredential(SQLModel, table=True):
+    __tablename__ = "password_credentials"
+
+    user_id: UUID = Field(foreign_key="users.id", primary_key=True)
+    password_hash: str = Field(max_length=255)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class PasswordResetToken(SQLModel, table=True):
+    __tablename__ = "password_reset_tokens"
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    user_id: UUID = Field(foreign_key="users.id", index=True)
+    token_hash: str = Field(unique=True, index=True, max_length=128)
+    expires_at: datetime
+    used_at: datetime | None = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
 class ProjectBase(SQLModel):
@@ -208,3 +268,8 @@ class ResourceExport(SQLModel, table=True):
 class ProjectTree(SQLModel):
     folders: list[ProjectFolderPublic]
     resources: list[ProjectResourcePublic]
+
+
+class WorkspaceBootstrap(SQLModel):
+    user: UserPublic
+    projects: list[ProjectPublic]

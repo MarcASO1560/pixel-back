@@ -1,10 +1,11 @@
 from fastapi import APIRouter
 
-from app.api.routes import exports, folders, login, projects, resources, revisions, users
+from app.api.routes import exports, folders, login, projects, resources, revisions, users, workspace
 
 api_router = APIRouter()
 api_router.include_router(login.router, prefix="/auth", tags=["auth"])
 api_router.include_router(users.router, prefix="/users", tags=["users"])
+api_router.include_router(workspace.router, prefix="/workspace", tags=["workspace"])
 api_router.include_router(projects.router, prefix="/projects", tags=["projects"])
 api_router.include_router(folders.router, prefix="/folders", tags=["folders"])
 api_router.include_router(resources.router, prefix="/resources", tags=["resources"])
