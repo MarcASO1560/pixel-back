@@ -7,7 +7,6 @@ from app.core.config import settings
 from app.core.email import send_password_reset_email
 from app.core.security import (
     create_access_token,
-    verify_frontend_auth_token,
     verify_google_access_token,
     verify_google_identity_token,
 )
@@ -16,18 +15,15 @@ from app.crud import (
     confirm_password_reset,
     create_password_reset_request,
     create_user_with_password,
-    get_or_create_user_from_api_key,
     upsert_user_from_identity,
 )
 from app.models import (
-    AuthSessionCreate,
     EmailPasswordSessionCreate,
     GoogleAuthSessionCreate,
     PasswordResetConfirmCreate,
     PasswordResetRequestCreate,
     PasswordResetRequestPublic,
     Token,
-    UserCreate,
     UserRegistrationCreate,
 )
 
@@ -76,13 +72,9 @@ def request_password_reset(
     reset_request: PasswordResetRequestCreate,
 ) -> PasswordResetRequestPublic:
     reset_token = create_password_reset_request(session=session, reset_request=reset_request)
-    email_sent = bool(
-        reset_token and send_password_reset_email(str(reset_request.email), reset_token)
-    )
-    return PasswordResetRequestPublic(
-        status="ok",
-        email_sent=email_sent,
-    )
+    if reset_token:
+        send_password_reset_email(str(reset_request.email), reset_token)
+    return PasswordResetRequestPublic(status="ok")
 
 
 @router.post("/password-reset/confirm", response_model=Token)
@@ -91,22 +83,6 @@ def reset_password(
     reset_confirm: PasswordResetConfirmCreate,
 ) -> Token:
     user = confirm_password_reset(session=session, reset_confirm=reset_confirm)
-    return create_user_token(user.id)
-
-
-@router.post("/session", response_model=Token)
-def create_session(
-    session: SessionDep,
-    session_in: AuthSessionCreate,
-) -> Token:
-    if not verify_frontend_auth_token(session_in.auth_token):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid auth token",
-        )
-
-    user_in = UserCreate.model_validate(session_in.model_dump(exclude={"auth_token"}))
-    user = get_or_create_user_from_api_key(session=session, user_create=user_in)
     return create_user_token(user.id)
 
 

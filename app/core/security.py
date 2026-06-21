@@ -1,6 +1,6 @@
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
-from secrets import compare_digest, token_urlsafe
+from secrets import token_urlsafe
 from uuid import UUID
 
 import bcrypt
@@ -38,10 +38,6 @@ def get_password_reset_token_hash(token: str) -> str:
     return sha256(token.encode("utf-8")).hexdigest()
 
 
-def verify_frontend_auth_token(auth_token: str) -> bool:
-    return compare_digest(auth_token, settings.FRONTEND_AUTH_TOKEN)
-
-
 def create_access_token(subject: UUID, expires_delta: timedelta) -> str:
     expire = datetime.now(UTC) + expires_delta
     to_encode = {"exp": expire, "sub": str(subject)}
@@ -73,9 +69,7 @@ def verify_google_identity_token(credential: str) -> UserCreate | None:
 
     return UserCreate(
         email=str(payload["email"]),
-        display_name=payload.get("name"),
         avatar_url=payload.get("picture"),
-        is_admin=False,
     )
 
 
@@ -133,7 +127,5 @@ def verify_google_access_token(access_token: str) -> UserCreate | None:
 
     return UserCreate(
         email=str(identity_payload["email"]),
-        display_name=identity_payload.get("name"),
         avatar_url=identity_payload.get("picture"),
-        is_admin=False,
     )

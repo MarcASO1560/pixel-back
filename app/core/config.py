@@ -1,4 +1,4 @@
-from pydantic import AnyUrl, computed_field
+from pydantic import AnyUrl, computed_field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEFAULT_CORS_ORIGINS = (
@@ -11,6 +11,7 @@ DEFAULT_CORS_ORIGINS = (
     "https://pixelartstudio.app",
     "https://www.pixelartstudio.app",
 )
+DEFAULT_SECRET_KEY = "change-this-secret-key"
 
 
 class Settings(BaseSettings):
@@ -18,6 +19,7 @@ class Settings(BaseSettings):
 
     PROJECT_NAME: str = "Pixel Studio API"
     ENVIRONMENT: str = "local"
+    VERCEL_ENV: str | None = None
     API_V1_STR: str = "/api/v1"
 
     BACKEND_CORS_ORIGINS: list[AnyUrl] | str = []
@@ -29,9 +31,8 @@ class Settings(BaseSettings):
     POSTGRES_PASSWORD: str = "postgres"
     POSTGRES_DB: str = "pixel_studio"
 
-    SECRET_KEY: str = "change-this-secret-key"
+    SECRET_KEY: str = DEFAULT_SECRET_KEY
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7
-    FRONTEND_AUTH_TOKEN: str = "change-this-frontend-auth-token"
     FRONTEND_URL: str = "http://127.0.0.1:4321"
     GOOGLE_CLIENT_ID: str | None = None
     RESEND_API_KEY: str | None = None
@@ -71,6 +72,19 @@ class Settings(BaseSettings):
         if isinstance(self.BACKEND_CORS_ORIGINS, str):
             return [origin.strip() for origin in self.BACKEND_CORS_ORIGINS.split(",") if origin]
         return [str(origin).rstrip("/") for origin in self.BACKEND_CORS_ORIGINS]
+
+    @model_validator(mode="after")
+    def validate_production_secrets(self) -> "Settings":
+        is_local = self.ENVIRONMENT.strip().lower() == "local" and self.VERCEL_ENV is None
+        if is_local:
+            return self
+
+        if self.SECRET_KEY == DEFAULT_SECRET_KEY or len(self.SECRET_KEY) < 32:
+            raise ValueError(
+                "SECRET_KEY must be configured with at least 32 characters outside local.",
+            )
+
+        return self
 
 
 settings = Settings()

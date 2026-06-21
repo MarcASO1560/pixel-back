@@ -11,5 +11,5 @@ router = APIRouter()
 def read_workspace(session: SessionDep, current_user: CurrentUser) -> WorkspaceBootstrap:
     return WorkspaceBootstrap(
         user=UserPublic.model_validate(current_user),
-        projects=list_projects(session=session, owner_id=current_user.id),
+        projects=list_projects(session=session, user_id=current_user.id),
     )
