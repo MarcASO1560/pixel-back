@@ -1,9 +1,10 @@
+import re
 from datetime import datetime
 from enum import StrEnum
 from typing import Any
 from uuid import UUID, uuid4
 
-from pydantic import EmailStr, field_validator
+from pydantic import ConfigDict, EmailStr, field_validator
 from sqlalchemy import JSON, Column
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
@@ -14,6 +15,56 @@ from app.time import utc_now
 def jsonb_column(name: str | None = None) -> Column:
     column_type = JSON().with_variant(JSONB, "postgresql")
     return Column(name, column_type) if name else Column(column_type)
+
+
+PIXEL_ART_PALETTE_MAX_ENTRIES = 128
+PIXEL_ART_PALETTE_ENTRY_NAME_MAX_LENGTH = 64
+PIXEL_ART_COLOR_PATTERN = re.compile(r"^#[0-9A-F]{6}(?:[0-9A-F]{2})?$")
+PIXEL_ART_PALETTE_ENTRY_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$")
+
+
+class PixelArtPaletteEntry(SQLModel):
+    """A stable, user-owned pixel-art palette entry stored as JSON."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1, max_length=80)
+    color: str = Field(min_length=7, max_length=9)
+    name: str | None = Field(
+        default=None,
+        max_length=PIXEL_ART_PALETTE_ENTRY_NAME_MAX_LENGTH,
+    )
+
+    @field_validator("id", mode="before")
+    @classmethod
+    def normalize_id(cls, value: object) -> str:
+        if not isinstance(value, str):
+            raise ValueError("Palette entry id must be text")
+        entry_id = value.strip()
+        if not PIXEL_ART_PALETTE_ENTRY_ID_PATTERN.fullmatch(entry_id):
+            raise ValueError(
+                "Palette entry id must contain only letters, numbers, hyphens, or underscores",
+            )
+        return entry_id
+
+    @field_validator("color", mode="before")
+    @classmethod
+    def normalize_color(cls, value: object) -> str:
+        if not isinstance(value, str):
+            raise ValueError("Palette entry color must be a hexadecimal color")
+        color = value.strip().upper()
+        if not PIXEL_ART_COLOR_PATTERN.fullmatch(color):
+            raise ValueError("Palette entry color must use #RRGGBB or #RRGGBBAA")
+        return color
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def normalize_name(cls, value: object) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("Palette entry name must be text")
+        return value.strip() or None
 
 
 class ResourceType(StrEnum):
@@ -46,6 +97,10 @@ class UserBase(SQLModel):
     email: EmailStr = Field(unique=True, index=True, max_length=255)
     avatar_url: str | None = Field(default=None, max_length=2048)
     avatar_pixel_art: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
+    pixel_art_palette: list[dict[str, Any]] = Field(
+        default_factory=list,
+        sa_column=jsonb_column(),
+    )
 
 
 class User(UserBase, table=True):
@@ -64,6 +119,10 @@ class UserCreate(UserBase):
 class UserUpdate(SQLModel):
     username: str | None = Field(default=None, min_length=3, max_length=40)
     avatar_pixel_art: dict[str, Any] | None = None
+    pixel_art_palette: list[PixelArtPaletteEntry] = Field(
+        default_factory=list,
+        max_length=PIXEL_ART_PALETTE_MAX_ENTRIES,
+    )
 
     @field_validator("username")
     @classmethod
@@ -73,6 +132,20 @@ class UserUpdate(SQLModel):
         if not username.replace("_", "").isalnum():
             raise ValueError("Username can only contain letters, numbers, and underscores")
         return username
+
+    @field_validator("pixel_art_palette")
+    @classmethod
+    def validate_pixel_art_palette(
+        cls,
+        entries: list[PixelArtPaletteEntry],
+    ) -> list[PixelArtPaletteEntry]:
+        ids = {entry.id for entry in entries}
+        colors = {entry.color for entry in entries}
+        if len(ids) != len(entries):
+            raise ValueError("Pixel-art palette entry ids must be unique")
+        if len(colors) != len(entries):
+            raise ValueError("Pixel-art palette colors must be unique")
+        return entries
 
 
 class GoogleAuthSessionCreate(SQLModel):
@@ -124,6 +197,10 @@ class TokenPayload(SQLModel):
 
 
 class UserPublic(UserBase):
+    pixel_art_palette: list[PixelArtPaletteEntry] = Field(
+        default_factory=list,
+        max_length=PIXEL_ART_PALETTE_MAX_ENTRIES,
+    )
     id: UUID
     is_admin: bool = False
     created_at: datetime
@@ -303,6 +380,10 @@ class ProjectResourceUpdate(SQLModel):
     name: str | None = Field(default=None, min_length=1, max_length=255)
     folder_id: UUID | None = None
     resource_metadata: dict[str, Any] | None = None
+    # The field stays optional for PATCH (exclude_unset omits the default), but
+    # an explicit JSON null must not make ProjectResourceDetail unreadable.
+    data: dict[str, Any] = Field(default_factory=dict)
+    base_revision: int | None = Field(default=None, ge=0)
     thumbnail_url: str | None = None
     color: str | None = Field(default=None, max_length=32)
     position: int | None = None
@@ -315,6 +396,7 @@ class ProjectResource(ProjectResourceBase, table=True):
     project_id: UUID = Field(foreign_key="projects.id", index=True)
     folder_id: UUID | None = Field(default=None, foreign_key="project_folders.id", index=True)
     data: dict[str, Any] = Field(default_factory=dict, sa_column=jsonb_column())
+    revision: int = Field(default=0, ge=0)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
     archived_at: datetime | None = None
@@ -324,6 +406,7 @@ class ProjectResourcePublic(ProjectResourceBase):
     id: UUID
     project_id: UUID
     folder_id: UUID | None
+    revision: int
     created_at: datetime
     updated_at: datetime
 

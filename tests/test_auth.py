@@ -1,6 +1,6 @@
 from collections.abc import Generator
 from contextlib import contextmanager
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 import requests
@@ -224,6 +224,138 @@ def test_current_user_can_update_profile_and_pixel_avatar() -> None:
         assert response.status_code == 200
         assert response.json()["username"] == "pixel_artist"
         assert response.json()["avatar_pixel_art"]["size"] == 16
+
+
+def test_current_user_can_persist_a_normalized_personal_pixel_art_palette() -> None:
+    with create_auth_client() as (client, _session):
+        register_response = client.post(
+            "/api/v1/auth/register",
+            json={
+                "username": "palette_user",
+                "email": "palette@example.com",
+                "password": "secret-pass",
+                "password_confirmation": "secret-pass",
+            },
+        )
+        headers = {"Authorization": f"Bearer {register_response.json()['access_token']}"}
+        first_id = "color-2a8198"
+        second_id = "color-2a8198-2"
+
+        update_response = client.patch(
+            "/api/v1/users/me",
+            headers=headers,
+            json={
+                "pixel_art_palette": [
+                    {
+                        "id": f"  {first_id}  ",
+                        "color": " #aabbcc ",
+                        "name": "  Ocean foam  ",
+                    },
+                    {"id": second_id, "color": "#10203080", "name": "   "},
+                ],
+            },
+        )
+        read_response = client.get("/api/v1/users/me", headers=headers)
+
+        expected_palette = [
+            {
+                "id": first_id,
+                "color": "#AABBCC",
+                "name": "Ocean foam",
+            },
+            {"id": second_id, "color": "#10203080", "name": None},
+        ]
+        assert update_response.status_code == 200
+        assert update_response.json()["pixel_art_palette"] == expected_palette
+        assert read_response.status_code == 200
+        assert read_response.json()["pixel_art_palette"] == expected_palette
+
+        profile_only_response = client.patch(
+            "/api/v1/users/me",
+            headers=headers,
+            json={"username": "palette_user_renamed"},
+        )
+
+        assert profile_only_response.status_code == 200
+        assert profile_only_response.json()["pixel_art_palette"] == expected_palette
+
+        clear_response = client.patch(
+            "/api/v1/users/me",
+            headers=headers,
+            json={"pixel_art_palette": []},
+        )
+
+        assert clear_response.status_code == 200
+        assert clear_response.json()["pixel_art_palette"] == []
+
+
+@pytest.mark.parametrize(
+    "palette",
+    [
+        [{"id": str(uuid4()), "color": "#12345"}],
+        [{"id": "invalid id!", "color": "#123456"}],
+        [{"id": "", "color": "#123456"}],
+        [{"id": "a" * 81, "color": "#123456"}],
+        [{"id": str(uuid4()), "color": "#123456", "unknown": True}],
+        [
+            {"id": "28ac445b-7019-44ca-b075-67c309933ae6", "color": "#123456"},
+            {"id": "28ac445b-7019-44ca-b075-67c309933ae6", "color": "#654321"},
+        ],
+        [
+            {"id": "11dc9919-8004-4422-a06c-7df14e4db4a9", "color": "#aabbcc"},
+            {"id": "ddbb26ad-748e-4e05-8570-31c822982e2b", "color": "#AABBCC"},
+        ],
+        [{"id": str(uuid4()), "color": "#123456", "name": "x" * 65}],
+        None,
+    ],
+)
+def test_current_user_rejects_invalid_personal_pixel_art_palette(palette: object) -> None:
+    with create_auth_client() as (client, _session):
+        register_response = client.post(
+            "/api/v1/auth/register",
+            json={
+                "username": "invalid_palette_user",
+                "email": "invalid-palette@example.com",
+                "password": "secret-pass",
+                "password_confirmation": "secret-pass",
+            },
+        )
+
+        response = client.patch(
+            "/api/v1/users/me",
+            headers={"Authorization": f"Bearer {register_response.json()['access_token']}"},
+            json={"pixel_art_palette": palette},
+        )
+
+        assert response.status_code == 422
+
+
+def test_current_user_rejects_more_than_128_personal_palette_entries() -> None:
+    with create_auth_client() as (client, _session):
+        register_response = client.post(
+            "/api/v1/auth/register",
+            json={
+                "username": "large_palette_user",
+                "email": "large-palette@example.com",
+                "password": "secret-pass",
+                "password_confirmation": "secret-pass",
+            },
+        )
+        palette = [
+            {
+                "id": str(uuid4()),
+                "color": f"#{index:06X}",
+            }
+            for index in range(129)
+        ]
+
+        response = client.patch(
+            "/api/v1/users/me",
+            headers={"Authorization": f"Bearer {register_response.json()['access_token']}"},
+            json={"pixel_art_palette": palette},
+        )
+
+        assert response.status_code == 422
 
 
 def test_email_password_session_requires_valid_password() -> None:
@@ -630,6 +762,331 @@ def test_project_owner_can_persist_folder_and_resource_items() -> None:
         assert tree_response.status_code == 200
         assert [folder["id"] for folder in tree_response.json()["folders"]] == [folder_id]
         assert [resource["id"] for resource in tree_response.json()["resources"]] == [resource_id]
+
+
+def test_project_owner_can_update_resource_data() -> None:
+    with create_auth_client() as (client, _session):
+        owner_response = client.post(
+            "/api/v1/auth/register",
+            json={
+                "username": "content_owner",
+                "email": "content-owner@example.com",
+                "password": "secret-pass",
+                "password_confirmation": "secret-pass",
+            },
+        )
+        owner_headers = {"Authorization": f"Bearer {owner_response.json()['access_token']}"}
+
+        project_response = client.post(
+            "/api/v1/projects/",
+            headers=owner_headers,
+            json={
+                "name": "Content project",
+                "description": None,
+                "settings": {},
+                "thumbnail_url": None,
+            },
+        )
+        project_id = project_response.json()["id"]
+        original_data = {
+            "pixel_art": {
+                "version": 1,
+                "width": 2,
+                "height": 1,
+                "anchor": "center",
+                "palette": ["#FFFFFF"],
+                "pixels": ["#FFFFFF", None],
+            },
+            "preserved_sibling": {"enabled": True},
+        }
+        resource_response = client.post(
+            f"/api/v1/projects/{project_id}/resources",
+            headers=owner_headers,
+            json={
+                "name": "Hero",
+                "type": "pixel_art",
+                "resource_metadata": {"kind": "image", "tag": "character"},
+                "thumbnail_url": None,
+                "color": "#ff8a72",
+                "position": 1,
+                "folder_id": None,
+                "data": original_data,
+            },
+        )
+        resource_id = resource_response.json()["id"]
+        original_updated_at = resource_response.json()["updated_at"]
+        assert resource_response.json()["revision"] == 0
+        next_data = {
+            "pixel_art": {
+                "version": 2,
+                "width": 2,
+                "height": 1,
+                "palette": ["#FFFFFF", "#FF0000"],
+                "layers": [
+                    {
+                        "id": "layer-base",
+                        "name": "Layer 1",
+                        "visible": True,
+                        "locked": False,
+                        "opacity": 1,
+                        "pixels": ["#FF0000", None],
+                    }
+                ],
+            },
+            "export": {"scale": 4},
+        }
+
+        update_response = client.patch(
+            f"/api/v1/projects/{project_id}/resources/{resource_id}",
+            headers=owner_headers,
+            json={"data": next_data},
+        )
+        detail_response = client.get(
+            f"/api/v1/projects/{project_id}/resources/{resource_id}",
+            headers=owner_headers,
+        )
+
+        assert update_response.status_code == 200
+        assert update_response.json()["revision"] == 1
+        assert update_response.json()["updated_at"] != original_updated_at
+        assert update_response.json()["name"] == "Hero"
+        assert update_response.json()["resource_metadata"] == {
+            "kind": "image",
+            "tag": "character",
+        }
+        assert detail_response.status_code == 200
+        assert detail_response.json()["revision"] == 1
+        assert detail_response.json()["data"] == next_data
+        assert detail_response.json()["resource_metadata"] == {
+            "kind": "image",
+            "tag": "character",
+        }
+
+
+def test_project_resource_revision_rejects_stale_updates() -> None:
+    with create_auth_client() as (client, _session):
+        owner_response = client.post(
+            "/api/v1/auth/register",
+            json={
+                "username": "revision_owner",
+                "email": "revision-owner@example.com",
+                "password": "secret-pass",
+                "password_confirmation": "secret-pass",
+            },
+        )
+        owner_headers = {"Authorization": f"Bearer {owner_response.json()['access_token']}"}
+        project_response = client.post(
+            "/api/v1/projects/",
+            headers=owner_headers,
+            json={
+                "name": "Revision project",
+                "description": None,
+                "settings": {},
+                "thumbnail_url": None,
+            },
+        )
+        project_id = project_response.json()["id"]
+        original_data = {
+            "pixel_art": {
+                "version": 1,
+                "width": 1,
+                "height": 1,
+                "pixels": [None],
+            }
+        }
+        resource_response = client.post(
+            f"/api/v1/projects/{project_id}/resources",
+            headers=owner_headers,
+            json={
+                "name": "Revision image",
+                "type": "pixel_art",
+                "resource_metadata": {"kind": "image"},
+                "thumbnail_url": None,
+                "color": "#79b8ff",
+                "position": 1,
+                "folder_id": None,
+                "data": original_data,
+            },
+        )
+        resource_id = resource_response.json()["id"]
+        first_data = {
+            "pixel_art": {
+                "version": 1,
+                "width": 1,
+                "height": 1,
+                "pixels": ["#FFFFFF"],
+            }
+        }
+
+        first_update_response = client.patch(
+            f"/api/v1/projects/{project_id}/resources/{resource_id}",
+            headers=owner_headers,
+            json={
+                "base_revision": 0,
+                "name": "Revision image edited",
+                "data": first_data,
+            },
+        )
+        stale_update_response = client.patch(
+            f"/api/v1/projects/{project_id}/resources/{resource_id}",
+            headers=owner_headers,
+            json={"base_revision": 0, "data": original_data},
+        )
+        detail_after_conflict_response = client.get(
+            f"/api/v1/projects/{project_id}/resources/{resource_id}",
+            headers=owner_headers,
+        )
+
+        assert resource_response.status_code == 200
+        assert resource_response.json()["revision"] == 0
+        assert first_update_response.status_code == 200
+        assert first_update_response.json()["revision"] == 1
+        assert first_update_response.json()["name"] == "Revision image edited"
+        assert stale_update_response.status_code == 409
+        assert stale_update_response.json() == {
+            "detail": {
+                "code": "resource_revision_conflict",
+                "current_revision": 1,
+            }
+        }
+        assert detail_after_conflict_response.status_code == 200
+        assert detail_after_conflict_response.json()["revision"] == 1
+        assert detail_after_conflict_response.json()["data"] == first_data
+
+        conflict_updated_at = detail_after_conflict_response.json()["updated_at"]
+        no_op_response = client.patch(
+            f"/api/v1/projects/{project_id}/resources/{resource_id}",
+            headers=owner_headers,
+            json={
+                "base_revision": 1,
+                "name": "Revision image edited",
+                "data": first_data,
+            },
+        )
+
+        assert no_op_response.status_code == 200
+        assert no_op_response.json()["revision"] == 1
+        assert no_op_response.json()["updated_at"] == conflict_updated_at
+
+        null_data_response = client.patch(
+            f"/api/v1/projects/{project_id}/resources/{resource_id}",
+            headers=owner_headers,
+            json={"base_revision": 1, "data": None},
+        )
+        detail_after_null_response = client.get(
+            f"/api/v1/projects/{project_id}/resources/{resource_id}",
+            headers=owner_headers,
+        )
+
+        assert null_data_response.status_code == 422
+        assert detail_after_null_response.status_code == 200
+        assert detail_after_null_response.json()["revision"] == 1
+        assert detail_after_null_response.json()["data"] == first_data
+
+
+def test_project_viewer_cannot_update_resource_data() -> None:
+    with create_auth_client() as (client, _session):
+        owner_response = client.post(
+            "/api/v1/auth/register",
+            json={
+                "username": "viewer_content_owner",
+                "email": "viewer-content-owner@example.com",
+                "password": "secret-pass",
+                "password_confirmation": "secret-pass",
+            },
+        )
+        viewer_response = client.post(
+            "/api/v1/auth/register",
+            json={
+                "username": "content_viewer",
+                "email": "content-viewer@example.com",
+                "password": "secret-pass",
+                "password_confirmation": "secret-pass",
+            },
+        )
+        owner_headers = {"Authorization": f"Bearer {owner_response.json()['access_token']}"}
+        viewer_headers = {"Authorization": f"Bearer {viewer_response.json()['access_token']}"}
+
+        project_response = client.post(
+            "/api/v1/projects/",
+            headers=owner_headers,
+            json={
+                "name": "Viewer content project",
+                "description": None,
+                "settings": {},
+                "thumbnail_url": None,
+            },
+        )
+        project_id = project_response.json()["id"]
+        original_data = {
+            "pixel_art": {
+                "version": 1,
+                "width": 1,
+                "height": 1,
+                "pixels": ["#FFFFFF"],
+            }
+        }
+        resource_response = client.post(
+            f"/api/v1/projects/{project_id}/resources",
+            headers=owner_headers,
+            json={
+                "name": "Protected image",
+                "type": "pixel_art",
+                "resource_metadata": {"kind": "image"},
+                "thumbnail_url": None,
+                "color": "#79b8ff",
+                "position": 1,
+                "folder_id": None,
+                "data": original_data,
+            },
+        )
+        resource_id = resource_response.json()["id"]
+        share_response = client.post(
+            f"/api/v1/projects/{project_id}/share-link",
+            headers=owner_headers,
+            json={"role": "viewer"},
+        )
+        accept_response = client.post(
+            f"/api/v1/projects/share-links/{share_response.json()['token']}/accept",
+            headers=viewer_headers,
+        )
+
+        update_response = client.patch(
+            f"/api/v1/projects/{project_id}/resources/{resource_id}",
+            headers=viewer_headers,
+            json={
+                "data": {
+                    "pixel_art": {
+                        "version": 2,
+                        "width": 1,
+                        "height": 1,
+                        "palette": ["#FF0000"],
+                        "layers": [
+                            {
+                                "id": "forbidden-layer",
+                                "name": "Layer 1",
+                                "visible": True,
+                                "locked": False,
+                                "opacity": 1,
+                                "pixels": ["#FF0000"],
+                            }
+                        ],
+                    }
+                }
+            },
+        )
+        detail_response = client.get(
+            f"/api/v1/projects/{project_id}/resources/{resource_id}",
+            headers=owner_headers,
+        )
+
+        assert share_response.status_code == 200
+        assert accept_response.status_code == 200
+        assert accept_response.json()["access_role"] == "viewer"
+        assert update_response.status_code == 403
+        assert update_response.json() == {"detail": "Insufficient project role"}
+        assert detail_response.status_code == 200
+        assert detail_response.json()["data"] == original_data
 
 
 def test_project_owner_can_move_items_between_folders() -> None:

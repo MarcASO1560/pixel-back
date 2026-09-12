@@ -3,7 +3,7 @@ from secrets import token_urlsafe
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from sqlalchemy import delete
+from sqlalchemy import delete, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlmodel import Session, select
 
@@ -363,6 +363,12 @@ def update_current_user(
 
     if "avatar_pixel_art" in user_data:
         current_user.avatar_pixel_art = user_data["avatar_pixel_art"]
+
+    if "pixel_art_palette" in user_data:
+        current_user.pixel_art_palette = [
+            entry.model_dump(mode="json", exclude_none=True)
+            for entry in user_update.pixel_art_palette
+        ]
 
     current_user.updated_at = utc_now()
     session.add(current_user)
@@ -1238,6 +1244,16 @@ def update_project_resource(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Resource not found")
 
     resource_data = resource_update.model_dump(exclude_unset=True)
+    base_revision = resource_data.pop("base_revision", None)
+    if base_revision is not None and base_revision != resource.revision:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "resource_revision_conflict",
+                "current_revision": resource.revision,
+            },
+        )
+
     if "folder_id" in resource_data and resource_data["folder_id"] is not None:
         parent_folder = session.get(ProjectFolder, resource_data["folder_id"])
         if not parent_folder or parent_folder.project_id != project.id:
@@ -1246,11 +1262,51 @@ def update_project_resource(
                 detail="Folder not found in this project",
             )
 
-    for field, value in resource_data.items():
-        setattr(resource, field, value)
+    changed_data = {
+        field: value
+        for field, value in resource_data.items()
+        if getattr(resource, field) != value
+    }
+    if not changed_data:
+        return resource
 
-    resource.updated_at = utc_now()
-    session.add(resource)
+    next_revision = resource.revision + 1
+    next_updated_at = utc_now()
+
+    if base_revision is not None:
+        result = session.execute(
+            update(ProjectResource)
+            .where(
+                ProjectResource.id == resource.id,
+                ProjectResource.revision == base_revision,
+            )
+            .values(
+                **changed_data,
+                revision=next_revision,
+                updated_at=next_updated_at,
+            ),
+        )
+        if result.rowcount != 1:
+            session.rollback()
+            current_resource = session.get(ProjectResource, resource.id)
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "resource_revision_conflict",
+                    "current_revision": current_resource.revision if current_resource else None,
+                },
+            )
+    else:
+        session.execute(
+            update(ProjectResource)
+            .where(ProjectResource.id == resource.id)
+            .values(
+                **changed_data,
+                revision=ProjectResource.revision + 1,
+                updated_at=next_updated_at,
+            ),
+        )
+
     session.commit()
     session.refresh(resource)
     publish_project_event(
@@ -1358,7 +1414,9 @@ def delete_project_folder(
         session.delete(resource)
 
     folders_to_delete = [
-        project_folder for project_folder in project_folders if project_folder.id in descendant_folder_ids
+        project_folder
+        for project_folder in project_folders
+        if project_folder.id in descendant_folder_ids
     ]
     folder_depth_cache: dict[UUID, int] = {}
 
