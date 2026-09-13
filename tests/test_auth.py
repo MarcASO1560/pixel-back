@@ -748,6 +748,10 @@ def test_project_owner_can_persist_folder_and_resource_items() -> None:
             f"/api/v1/projects/{project_id}/tree",
             headers=owner_headers,
         )
+        workspace_response = client.get(
+            f"/api/v1/workspace/projects/{project_id}",
+            headers=owner_headers,
+        )
 
         assert folder_response.status_code == 200
         assert folder_response.json()["name"] == "Sprites"
@@ -762,6 +766,16 @@ def test_project_owner_can_persist_folder_and_resource_items() -> None:
         assert tree_response.status_code == 200
         assert [folder["id"] for folder in tree_response.json()["folders"]] == [folder_id]
         assert [resource["id"] for resource in tree_response.json()["resources"]] == [resource_id]
+        assert workspace_response.status_code == 200
+        assert workspace_response.json()["user"]["username"] == "item_owner"
+        assert workspace_response.json()["project"]["id"] == project_id
+        assert workspace_response.json()["project"]["access_role"] == "owner"
+        assert [
+            folder["id"] for folder in workspace_response.json()["tree"]["folders"]
+        ] == [folder_id]
+        assert [
+            resource["id"] for resource in workspace_response.json()["tree"]["resources"]
+        ] == [resource_id]
 
 
 def test_project_owner_can_update_resource_data() -> None:

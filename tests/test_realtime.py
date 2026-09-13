@@ -1,7 +1,24 @@
 import asyncio
 from uuid import uuid4
 
+from fastapi import Request
+
+from app.api.routes.events import read_last_event_id
 from app.realtime import RealtimeBroker
+
+
+def test_event_stream_only_replays_when_a_last_event_id_is_provided() -> None:
+    fresh_request = Request({"type": "http", "headers": []})
+    resumed_request = Request(
+        {"type": "http", "headers": [(b"last-event-id", b"42")]},
+    )
+    invalid_request = Request(
+        {"type": "http", "headers": [(b"last-event-id", b"invalid")]},
+    )
+
+    assert read_last_event_id(fresh_request) is None
+    assert read_last_event_id(resumed_request) == 42
+    assert read_last_event_id(invalid_request) is None
 
 
 def test_realtime_broker_delivers_user_scoped_events() -> None:

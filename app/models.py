@@ -452,3 +452,9 @@ class ProjectTree(SQLModel):
 class WorkspaceBootstrap(SQLModel):
     user: UserPublic
     projects: list[ProjectPublic]
+
+
+class ProjectWorkspaceBootstrap(SQLModel):
+    user: UserPublic
+    project: ProjectPublic
+    tree: ProjectTree

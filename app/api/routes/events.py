@@ -5,6 +5,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
+from sqlalchemy import func
 from sqlalchemy.exc import SQLAlchemyError
 from sqlmodel import Session, select
 
@@ -24,14 +25,25 @@ def format_sse_event(*, event: str, data: dict, event_id: int | None = None) -> 
     return f"{id_line}event: {event}\ndata: {encoded_data}\n\n"
 
 
-def read_last_event_id(request: Request) -> int:
+def read_last_event_id(request: Request) -> int | None:
     raw_last_event_id = request.headers.get("last-event-id")
     if not raw_last_event_id:
-        return 0
+        return None
 
     try:
         return max(0, int(raw_last_event_id))
     except ValueError:
+        return None
+
+
+def latest_event_id(*, session: Session, user_id: UUID) -> int:
+    statement = select(func.max(RealtimeEventLog.id)).where(
+        RealtimeEventLog.user_id == user_id,
+    )
+    try:
+        return int(session.exec(statement).one() or 0)
+    except SQLAlchemyError:
+        session.rollback()
         return 0
 
 
@@ -67,7 +79,12 @@ async def stream_events(
         user_id=current_user.id,
         loop=asyncio.get_running_loop(),
     )
-    last_event_id = read_last_event_id(request)
+    requested_event_id = read_last_event_id(request)
+    last_event_id = (
+        requested_event_id
+        if requested_event_id is not None
+        else latest_event_id(session=session, user_id=current_user.id)
+    )
 
     async def event_generator() -> AsyncGenerator[str, None]:
         nonlocal last_event_id

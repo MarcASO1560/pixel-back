@@ -37,11 +37,13 @@ from app.models import (
     ProjectShareLinkPublic,
     ProjectTree,
     ProjectUpdate,
+    ProjectWorkspaceBootstrap,
     RealtimeEventLog,
     ResourceExport,
     ResourceRevision,
     User,
     UserCreate,
+    UserPublic,
     UserRegistrationCreate,
     UserUpdate,
 )
@@ -76,10 +78,10 @@ def get_user_by_username(*, session: Session, username: str) -> User | None:
 
 
 def get_project_access_count(*, session: Session, project_id: UUID) -> int:
-    member_ids = session.exec(
-        select(ProjectMember.user_id).where(ProjectMember.project_id == project_id),
-    ).all()
-    return 1 + len(member_ids)
+    member_count = session.exec(
+        select(func.count(ProjectMember.user_id)).where(ProjectMember.project_id == project_id),
+    ).one()
+    return 1 + int(member_count)
 
 
 def project_to_public(*, session: Session, project: Project, access_role: str) -> ProjectPublic:
@@ -605,13 +607,13 @@ def get_owned_project_or_404(
     return project
 
 
-def get_project_or_404(
+def get_project_with_access_or_404(
     *,
     session: Session,
     user_id: UUID,
     project_id: str,
     required_roles: set[str] | None = None,
-) -> Project:
+) -> tuple[Project, str]:
     parsed_project_id = parse_project_id_or_404(project_id)
 
     project = session.get(Project, parsed_project_id)
@@ -620,7 +622,7 @@ def get_project_or_404(
 
     access_role = get_project_access_role(session=session, project=project, user_id=user_id)
     if access_role and (required_roles is None or access_role in required_roles):
-        return project
+        return project, access_role
 
     if access_role:
         raise HTTPException(
@@ -631,9 +633,23 @@ def get_project_or_404(
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
 
 
-def get_project_tree(*, session: Session, user_id: UUID, project_id: str) -> ProjectTree:
-    project = get_project_or_404(session=session, user_id=user_id, project_id=project_id)
+def get_project_or_404(
+    *,
+    session: Session,
+    user_id: UUID,
+    project_id: str,
+    required_roles: set[str] | None = None,
+) -> Project:
+    project, _access_role = get_project_with_access_or_404(
+        session=session,
+        user_id=user_id,
+        project_id=project_id,
+        required_roles=required_roles,
+    )
+    return project
 
+
+def get_project_tree_for_project(*, session: Session, project: Project) -> ProjectTree:
     folders_statement = (
         select(ProjectFolder)
         .where(ProjectFolder.project_id == project.id)
@@ -648,6 +664,33 @@ def get_project_tree(*, session: Session, user_id: UUID, project_id: str) -> Pro
     return ProjectTree(
         folders=list(session.exec(folders_statement).all()),
         resources=list(session.exec(resources_statement).all()),
+    )
+
+
+def get_project_tree(*, session: Session, user_id: UUID, project_id: str) -> ProjectTree:
+    project = get_project_or_404(session=session, user_id=user_id, project_id=project_id)
+    return get_project_tree_for_project(session=session, project=project)
+
+
+def get_project_workspace(
+    *,
+    session: Session,
+    user: User,
+    project_id: str,
+) -> ProjectWorkspaceBootstrap:
+    project, access_role = get_project_with_access_or_404(
+        session=session,
+        user_id=user.id,
+        project_id=project_id,
+    )
+    return ProjectWorkspaceBootstrap(
+        user=UserPublic.model_validate(user),
+        project=project_to_public(
+            session=session,
+            project=project,
+            access_role=access_role,
+        ),
+        tree=get_project_tree_for_project(session=session, project=project),
     )
 
 
