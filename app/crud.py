@@ -3,7 +3,7 @@ from secrets import token_urlsafe
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from sqlalchemy import delete, update
+from sqlalchemy import delete, func, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlmodel import Session, select
 
@@ -452,21 +452,41 @@ def list_projects(*, session: Session, user_id: UUID) -> list[ProjectPublic]:
         .where(ProjectMember.user_id == user_id)
     )
 
-    projects_by_id: dict[UUID, ProjectPublic] = {
-        project.id: project_to_public(session=session, project=project, access_role="owner")
+    projects_by_id: dict[UUID, tuple[Project, str]] = {
+        project.id: (project, ProjectAccessRole.owner.value)
         for project in session.exec(owned_statement).all()
     }
 
     for project, member in session.exec(shared_statement).all():
         if project.id not in projects_by_id:
-            projects_by_id[project.id] = project_to_public(
-                session=session,
-                project=project,
-                access_role=member.role,
-            )
+            projects_by_id[project.id] = (project, member.role)
+
+    if not projects_by_id:
+        return []
+
+    member_count_statement = (
+        select(ProjectMember.project_id, func.count(ProjectMember.user_id))
+        .where(ProjectMember.project_id.in_(projects_by_id))
+        .group_by(ProjectMember.project_id)
+    )
+    member_counts = {
+        project_id: int(member_count)
+        for project_id, member_count in session.exec(member_count_statement).all()
+    }
+
+    public_projects = [
+        ProjectPublic.model_validate(
+            project,
+            update={
+                "access_role": access_role,
+                "access_count": 1 + member_counts.get(project_id, 0),
+            },
+        )
+        for project_id, (project, access_role) in projects_by_id.items()
+    ]
 
     return sorted(
-        projects_by_id.values(),
+        public_projects,
         key=lambda project: project.updated_at,
         reverse=True,
     )
