@@ -1,16 +1,19 @@
 import asyncio
 import json
 from collections.abc import AsyncGenerator
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func
 from sqlalchemy.exc import SQLAlchemyError
 from sqlmodel import Session, select
 
 from app.api.deps import CookieCurrentUser, SessionDep
-from app.models import RealtimeEventLog
+from app.core.config import settings
+from app.core.security import create_supabase_realtime_token
+from app.models import RealtimeConfigPublic, RealtimeEventLog, RealtimeEventPublic
 from app.realtime import realtime_broker
 
 router = APIRouter()
@@ -69,6 +72,45 @@ def list_pending_events(
         return []
 
 
+@router.get("/config", response_model=RealtimeConfigPublic)
+def get_realtime_config(
+    response: Response,
+    session: SessionDep,
+    current_user: CookieCurrentUser,
+) -> RealtimeConfigPublic:
+    response.headers["Cache-Control"] = "no-store"
+    current_event_id = latest_event_id(session=session, user_id=current_user.id)
+    if not settings.supabase_realtime_enabled:
+        return RealtimeConfigPublic(enabled=False, latest_event_id=current_event_id)
+
+    expires_delta = timedelta(minutes=max(1, settings.SUPABASE_REALTIME_TOKEN_MINUTES))
+    return RealtimeConfigPublic(
+        enabled=True,
+        supabase_url=settings.SUPABASE_URL.rstrip("/"),
+        publishable_key=settings.SUPABASE_PUBLISHABLE_KEY,
+        access_token=create_supabase_realtime_token(
+            current_user.id,
+            expires_delta=expires_delta,
+        ),
+        expires_at=datetime.now(UTC) + expires_delta,
+        channel=f"user:{current_user.id}",
+        latest_event_id=current_event_id,
+    )
+
+
+@router.get("/pending", response_model=list[RealtimeEventPublic])
+def get_pending_events(
+    session: SessionDep,
+    current_user: CookieCurrentUser,
+    after_event_id: int = Query(default=0, ge=0),
+) -> list[RealtimeEventLog]:
+    return list_pending_events(
+        session=session,
+        user_id=current_user.id,
+        after_event_id=after_event_id,
+    )
+
+
 @router.get("/stream")
 async def stream_events(
     request: Request,
@@ -125,7 +167,10 @@ async def stream_events(
                 )
                 event = await subscription.get(timeout_seconds)
                 if event:
-                    yield format_sse_event(event=event.event, data=event.data)
+                    # The in-memory broker only wakes this stream. Reading the
+                    # persisted row on the next iteration keeps SSE event ids
+                    # correct and avoids delivering the same event twice.
+                    continue
                 else:
                     yield ": heartbeat\n\n"
         finally:

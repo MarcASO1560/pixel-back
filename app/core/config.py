@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7
     FRONTEND_URL: str = "http://127.0.0.1:4321"
     GOOGLE_CLIENT_ID: str | None = None
+    SUPABASE_URL: str | None = None
+    SUPABASE_PUBLISHABLE_KEY: str | None = None
+    SUPABASE_JWT_SECRET: str | None = None
+    SUPABASE_REALTIME_TOKEN_MINUTES: int = 15
     RESEND_API_KEY: str | None = None
     RESEND_FROM_EMAIL: str = "Sefkira Studio <no-reply@sefkirastudio.com>"
     SMTP_HOST: str | None = None
@@ -67,6 +71,17 @@ class Settings(BaseSettings):
     def all_cors_origins(self) -> list[str]:
         origins = [*DEFAULT_CORS_ORIGINS, *self._configured_cors_origins()]
         return list(dict.fromkeys(origin.rstrip("/") for origin in origins if origin))
+
+    @property
+    def supabase_realtime_enabled(self) -> bool:
+        return all(
+            value and value.strip()
+            for value in (
+                self.SUPABASE_URL,
+                self.SUPABASE_PUBLISHABLE_KEY,
+                self.SUPABASE_JWT_SECRET,
+            )
+        )
 
     def _configured_cors_origins(self) -> list[str]:
         if isinstance(self.BACKEND_CORS_ORIGINS, str):

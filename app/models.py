@@ -199,6 +199,23 @@ class TokenPayload(SQLModel):
     exp: int | None = None
 
 
+class RealtimeConfigPublic(SQLModel):
+    enabled: bool
+    supabase_url: str | None = None
+    publishable_key: str | None = None
+    access_token: str | None = None
+    expires_at: datetime | None = None
+    channel: str | None = None
+    latest_event_id: int = 0
+
+
+class RealtimeEventPublic(SQLModel):
+    id: int
+    event: str
+    data: dict[str, Any]
+    created_at: datetime
+
+
 class UserPublic(UserBase):
     pixel_art_palette: list[PixelArtPaletteEntry] = Field(
         default_factory=list,

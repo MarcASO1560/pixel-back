@@ -21,6 +21,10 @@ DATABASE_URL="postgresql+psycopg://postgres:postgres@localhost:5432/pixel_studio
 SECRET_KEY="change-this-secret-key-use-at-least-32-characters"
 FRONTEND_URL="http://127.0.0.1:4321"
 GOOGLE_CLIENT_ID="tu-google-client-id.apps.googleusercontent.com"
+SUPABASE_URL="https://tu-proyecto.supabase.co"
+SUPABASE_PUBLISHABLE_KEY="sb_publishable_xxxxxxxxx"
+SUPABASE_JWT_SECRET="legacy-jwt-secret-de-supabase"
+SUPABASE_REALTIME_TOKEN_MINUTES=15
 RESEND_API_KEY="re_xxxxxxxxx"
 RESEND_FROM_EMAIL="Sefkira Studio <no-reply@sefkirastudio.com>"
 ```
@@ -42,6 +46,10 @@ DATABASE_URL="postgresql+psycopg://usuario:password@host:6543/postgres"
 SECRET_KEY="clave-larga-de-32-caracteres-o-mas"
 FRONTEND_URL="https://sefkirastudio.com"
 GOOGLE_CLIENT_ID="tu-google-client-id.apps.googleusercontent.com"
+SUPABASE_URL="https://tu-proyecto.supabase.co"
+SUPABASE_PUBLISHABLE_KEY="sb_publishable_xxxxxxxxx"
+SUPABASE_JWT_SECRET="legacy-jwt-secret-de-supabase"
+SUPABASE_REALTIME_TOKEN_MINUTES=15
 RESEND_API_KEY="re_xxxxxxxxx"
 RESEND_FROM_EMAIL="Sefkira Studio <no-reply@sefkirastudio.com>"
 SMTP_HOST="smtp.gmail.com"
@@ -56,6 +64,15 @@ SMTP_USE_TLS=true
 El backend ya permite por defecto `localhost`, `sefkirastudio.com`, `www.sefkirastudio.com`, `pixelartstudio.app` y `www.pixelartstudio.app`. `BACKEND_CORS_ORIGINS` solo hace falta si quieres sumar mas origenes.
 
 Para Supabase en Vercel, usa la conexion `Transaction pooler` del panel de Supabase. Vercel es serverless, y Supabase recomienda ese modo para funciones temporales. El backend ya usa `NullPool` para no abrir un pool extra encima del pooler de Supabase y desactiva prepared statements para ser compatible con el pooler de transacciones.
+
+La sincronizacion en tiempo real usa Supabase Realtime Broadcast con canales privados por
+usuario. `SUPABASE_PUBLISHABLE_KEY` es la clave publica del proyecto.
+`SUPABASE_JWT_SECRET` es el `Legacy JWT secret` del proyecto y nunca debe exponerse en el
+frontend. Tras configurar estas variables, ejecuta `alembic upgrade head` para instalar el
+trigger de Broadcast y su politica RLS. Si la configuracion no esta completa, el frontend
+usa automaticamente el SSE anterior como respaldo. La firma HS256 queda encapsulada en
+`create_supabase_realtime_token` para poder migrarla posteriormente a una clave asimetrica
+sin cambiar el protocolo del frontend.
 
 `PROJECT_NAME`, `API_V1_STR`, `ACCESS_TOKEN_EXPIRE_MINUTES` y los datos de PostgreSQL separados tienen valores por defecto en el codigo, asi que no hace falta crearlos en Vercel. Tampoco hay usuario admin por defecto en variables de entorno.
 

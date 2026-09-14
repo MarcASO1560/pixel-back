@@ -1,9 +1,15 @@
 import asyncio
+from datetime import timedelta
+from types import SimpleNamespace
 from uuid import uuid4
 
-from fastapi import Request
+import jwt
+import pytest
+from fastapi import Request, Response
 
+from app.api.routes import events
 from app.api.routes.events import read_last_event_id
+from app.core import security
 from app.realtime import RealtimeBroker
 
 
@@ -56,3 +62,83 @@ def test_realtime_broker_delivers_user_scoped_events() -> None:
         assert await subscription.get(timeout_seconds=0.01) is None
 
     asyncio.run(scenario())
+
+
+def test_supabase_realtime_token_contains_private_channel_claims(monkeypatch) -> None:
+    user_id = uuid4()
+    signing_secret = "test-supabase-signing-secret-long-enough"
+    monkeypatch.setattr(security.settings, "SUPABASE_JWT_SECRET", signing_secret)
+
+    token = security.create_supabase_realtime_token(
+        user_id,
+        expires_delta=timedelta(minutes=15),
+    )
+    payload = jwt.decode(
+        token,
+        signing_secret,
+        algorithms=[security.ALGORITHM],
+        audience="authenticated",
+    )
+
+    assert payload["sub"] == str(user_id)
+    assert payload["role"] == "authenticated"
+    assert payload["iat"] < payload["exp"]
+
+
+def test_realtime_config_enables_supabase_and_starts_at_latest_event(
+    monkeypatch,
+) -> None:
+    user_id = uuid4()
+    monkeypatch.setattr(events.settings, "SUPABASE_URL", "https://project.supabase.co/")
+    monkeypatch.setattr(events.settings, "SUPABASE_PUBLISHABLE_KEY", "sb_publishable_test")
+    monkeypatch.setattr(
+        events.settings,
+        "SUPABASE_JWT_SECRET",
+        "realtime-signing-secret-long-enough",
+    )
+    monkeypatch.setattr(events, "latest_event_id", lambda **_kwargs: 27)
+
+    response = Response()
+    config = events.get_realtime_config(
+        response=response,
+        session=object(),  # type: ignore[arg-type]
+        current_user=SimpleNamespace(id=user_id),  # type: ignore[arg-type]
+    )
+
+    assert config.enabled is True
+    assert config.supabase_url == "https://project.supabase.co"
+    assert config.publishable_key == "sb_publishable_test"
+    assert config.channel == f"user:{user_id}"
+    assert config.latest_event_id == 27
+    assert config.access_token
+    assert config.expires_at and config.expires_at.tzinfo is not None
+    assert response.headers["cache-control"] == "no-store"
+
+
+def test_realtime_config_keeps_sse_fallback_when_supabase_is_incomplete(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(events.settings, "SUPABASE_URL", "https://project.supabase.co")
+    monkeypatch.setattr(events.settings, "SUPABASE_PUBLISHABLE_KEY", None)
+    monkeypatch.setattr(events.settings, "SUPABASE_JWT_SECRET", None)
+    monkeypatch.setattr(events, "latest_event_id", lambda **_kwargs: 4)
+
+    config = events.get_realtime_config(
+        response=Response(),
+        session=object(),  # type: ignore[arg-type]
+        current_user=SimpleNamespace(id=uuid4()),  # type: ignore[arg-type]
+    )
+
+    assert config.enabled is False
+    assert config.latest_event_id == 4
+    assert config.access_token is None
+
+
+def test_supabase_realtime_token_requires_a_signing_secret(monkeypatch) -> None:
+    monkeypatch.setattr(security.settings, "SUPABASE_JWT_SECRET", None)
+
+    with pytest.raises(ValueError, match="SUPABASE_JWT_SECRET"):
+        security.create_supabase_realtime_token(
+            uuid4(),
+            expires_delta=timedelta(minutes=15),
+        )

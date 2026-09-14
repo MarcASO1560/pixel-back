@@ -44,6 +44,21 @@ def create_access_token(subject: UUID, expires_delta: timedelta) -> str:
     return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=ALGORITHM)
 
 
+def create_supabase_realtime_token(subject: UUID, expires_delta: timedelta) -> str:
+    if not settings.SUPABASE_JWT_SECRET:
+        raise ValueError("SUPABASE_JWT_SECRET is not configured")
+
+    issued_at = datetime.now(UTC)
+    payload = {
+        "aud": "authenticated",
+        "exp": issued_at + expires_delta,
+        "iat": issued_at,
+        "role": "authenticated",
+        "sub": str(subject),
+    }
+    return jwt.encode(payload, settings.SUPABASE_JWT_SECRET, algorithm=ALGORITHM)
+
+
 def decode_access_token(token: str) -> dict[str, object]:
     return jwt.decode(token, settings.SECRET_KEY, algorithms=[ALGORITHM])
 
