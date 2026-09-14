@@ -25,6 +25,7 @@ from app.models import (
     ProjectResource,
     ProjectShareLink,
     RealtimeEventLog,
+    ResourceEditorState,
     ResourceExport,
     ResourceRevision,
     User,
@@ -49,6 +50,7 @@ def create_auth_client() -> Generator[tuple[TestClient, Session], None, None]:
             ProjectFolder.__table__,
             ProjectMember.__table__,
             ProjectResource.__table__,
+            ResourceEditorState.__table__,
             ProjectShareLink.__table__,
             ResourceExport.__table__,
             ResourceRevision.__table__,
@@ -776,6 +778,114 @@ def test_project_owner_can_persist_folder_and_resource_items() -> None:
         assert [
             resource["id"] for resource in workspace_response.json()["tree"]["resources"]
         ] == [resource_id]
+
+
+def test_resource_editor_state_is_private_per_user_and_available_to_viewers() -> None:
+    with create_auth_client() as (client, session):
+        owner_response = client.post(
+            "/api/v1/auth/register",
+            json={
+                "username": "session_owner",
+                "email": "session-owner@example.com",
+                "password": "secret-pass",
+                "password_confirmation": "secret-pass",
+            },
+        )
+        viewer_response = client.post(
+            "/api/v1/auth/register",
+            json={
+                "username": "session_viewer",
+                "email": "session-viewer@example.com",
+                "password": "secret-pass",
+                "password_confirmation": "secret-pass",
+            },
+        )
+        owner_headers = {
+            "Authorization": f"Bearer {owner_response.json()['access_token']}",
+        }
+        viewer_headers = {
+            "Authorization": f"Bearer {viewer_response.json()['access_token']}",
+        }
+        project_response = client.post(
+            "/api/v1/projects/",
+            headers=owner_headers,
+            json={
+                "name": "Private editor state",
+                "description": None,
+                "settings": {},
+                "thumbnail_url": None,
+            },
+        )
+        project_id = project_response.json()["id"]
+        resource_response = client.post(
+            f"/api/v1/projects/{project_id}/resources",
+            headers=owner_headers,
+            json={
+                "name": "Shared sprite",
+                "type": "pixel_art",
+                "resource_metadata": {"kind": "image"},
+                "thumbnail_url": None,
+                "color": "#79b8ff",
+                "position": 1,
+                "folder_id": None,
+                "data": {"pixel_art": {"version": 2}},
+            },
+        )
+        resource_id = resource_response.json()["id"]
+        share_response = client.post(
+            f"/api/v1/projects/{project_id}/share-link",
+            headers=owner_headers,
+            json={"role": "viewer"},
+        )
+        client.post(
+            f"/api/v1/projects/share-links/{share_response.json()['token']}/accept",
+            headers=viewer_headers,
+        )
+        state_url = f"/api/v1/projects/{project_id}/resources/{resource_id}/editor-state"
+
+        assert client.get(state_url, headers=owner_headers).json() is None
+        owner_save = client.put(
+            state_url,
+            headers=owner_headers,
+            json={
+                "version": 1,
+                "state": {
+                    "activeLayerId": "owner-layer",
+                    "primaryColor": "#FF0000",
+                },
+            },
+        )
+        viewer_save = client.put(
+            state_url,
+            headers=viewer_headers,
+            json={
+                "version": 1,
+                "state": {
+                    "activeLayerId": "viewer-layer",
+                    "primaryColor": "#0000FF",
+                },
+            },
+        )
+
+        assert owner_save.status_code == 200
+        assert viewer_save.status_code == 200
+        assert client.get(state_url, headers=owner_headers).json()["state"] == {
+            "activeLayerId": "owner-layer",
+            "primaryColor": "#FF0000",
+        }
+        assert client.get(state_url, headers=viewer_headers).json()["state"] == {
+            "activeLayerId": "viewer-layer",
+            "primaryColor": "#0000FF",
+        }
+        assert len(session.exec(select(ResourceEditorState)).all()) == 2
+
+        delete_response = client.delete(
+            state_url.removesuffix("/editor-state"),
+            headers=owner_headers,
+        )
+
+        assert delete_response.status_code == 204
+        assert session.exec(select(ResourceEditorState)).all() == []
 
 
 def test_project_owner_can_update_resource_data() -> None:

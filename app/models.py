@@ -1,3 +1,4 @@
+import json
 import re
 from datetime import datetime
 from enum import StrEnum
@@ -5,22 +6,24 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from pydantic import ConfigDict, EmailStr, field_validator
-from sqlalchemy import JSON, Column
+from sqlalchemy import JSON, Column, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
 from app.time import utc_now
 
 
-def jsonb_column(name: str | None = None) -> Column:
+def jsonb_column(name: str | None = None, *, nullable: bool | None = None) -> Column:
     column_type = JSON().with_variant(JSONB, "postgresql")
-    return Column(name, column_type) if name else Column(column_type)
+    options = {} if nullable is None else {"nullable": nullable}
+    return Column(name, column_type, **options) if name else Column(column_type, **options)
 
 
 PIXEL_ART_PALETTE_MAX_ENTRIES = 128
 PIXEL_ART_PALETTE_ENTRY_NAME_MAX_LENGTH = 64
 PIXEL_ART_COLOR_PATTERN = re.compile(r"^#[0-9A-F]{6}(?:[0-9A-F]{2})?$")
 PIXEL_ART_PALETTE_ENTRY_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$")
+RESOURCE_EDITOR_STATE_MAX_BYTES = 64 * 1024
 
 
 class PixelArtPaletteEntry(SQLModel):
@@ -413,6 +416,56 @@ class ProjectResourcePublic(ProjectResourceBase):
 
 class ProjectResourceDetail(ProjectResourcePublic):
     data: dict[str, Any]
+
+
+class ResourceEditorStateUpdate(SQLModel):
+    """Versioned, private editor state for one user and one resource."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: int = Field(default=1, ge=1, le=100)
+    state: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("state")
+    @classmethod
+    def limit_state_size(cls, value: dict[str, Any]) -> dict[str, Any]:
+        serialized = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        if len(serialized.encode("utf-8")) > RESOURCE_EDITOR_STATE_MAX_BYTES:
+            raise ValueError("Editor state must be at most 64 KiB")
+        return value
+
+
+class ResourceEditorState(SQLModel, table=True):
+    __tablename__ = "resource_editor_states"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "resource_id",
+            name="uq_resource_editor_states_user_resource",
+        ),
+    )
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    user_id: UUID = Field(foreign_key="users.id", index=True, ondelete="CASCADE")
+    resource_id: UUID = Field(
+        foreign_key="project_resources.id",
+        index=True,
+        ondelete="CASCADE",
+    )
+    version: int = Field(default=1, ge=1)
+    state: dict[str, Any] = Field(
+        default_factory=dict,
+        sa_column=jsonb_column(nullable=False),
+    )
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class ResourceEditorStatePublic(ResourceEditorStateUpdate):
+    user_id: UUID
+    resource_id: UUID
+    created_at: datetime
+    updated_at: datetime
 
 
 class ResourceRevision(SQLModel, table=True):

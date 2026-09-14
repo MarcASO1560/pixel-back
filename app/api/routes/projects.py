@@ -14,6 +14,7 @@ from app.crud import (
     get_project_resource,
     get_project_share_link,
     get_project_tree,
+    get_resource_editor_state,
     leave_project,
     list_project_access,
     list_projects,
@@ -22,6 +23,7 @@ from app.crud import (
     update_project_folder,
     update_project_member_role,
     update_project_resource,
+    upsert_resource_editor_state,
 )
 from app.models import (
     ProjectAccessUserPublic,
@@ -39,6 +41,8 @@ from app.models import (
     ProjectShareLinkPublic,
     ProjectTree,
     ProjectUpdate,
+    ResourceEditorStatePublic,
+    ResourceEditorStateUpdate,
 )
 
 router = APIRouter()
@@ -225,6 +229,44 @@ def read_project_resource(
         user_id=current_user.id,
         project_id=project_id,
         resource_id=resource_id,
+    )
+
+
+@router.get(
+    "/{project_id}/resources/{resource_id}/editor-state",
+    response_model=ResourceEditorStatePublic | None,
+)
+def read_resource_editor_state(
+    session: SessionDep,
+    current_user: CurrentUser,
+    project_id: str,
+    resource_id: str,
+) -> ResourceEditorStatePublic | None:
+    return get_resource_editor_state(
+        session=session,
+        user_id=current_user.id,
+        project_id=project_id,
+        resource_id=resource_id,
+    )
+
+
+@router.put(
+    "/{project_id}/resources/{resource_id}/editor-state",
+    response_model=ResourceEditorStatePublic,
+)
+def save_resource_editor_state(
+    session: SessionDep,
+    current_user: CurrentUser,
+    project_id: str,
+    resource_id: str,
+    state_in: ResourceEditorStateUpdate,
+) -> ResourceEditorStatePublic:
+    return upsert_resource_editor_state(
+        session=session,
+        user_id=current_user.id,
+        project_id=project_id,
+        resource_id=resource_id,
+        state_update=state_in,
     )
 
 

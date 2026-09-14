@@ -4,7 +4,7 @@ from uuid import UUID
 
 from fastapi import HTTPException, status
 from sqlalchemy import delete, func, update
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlmodel import Session, select
 
 from app.core.config import settings
@@ -39,6 +39,8 @@ from app.models import (
     ProjectUpdate,
     ProjectWorkspaceBootstrap,
     RealtimeEventLog,
+    ResourceEditorState,
+    ResourceEditorStateUpdate,
     ResourceExport,
     ResourceRevision,
     User,
@@ -716,6 +718,77 @@ def get_project_resource(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Resource not found")
 
     return resource
+
+
+def get_resource_editor_state(
+    *,
+    session: Session,
+    user_id: UUID,
+    project_id: str,
+    resource_id: str,
+) -> ResourceEditorState | None:
+    resource = get_project_resource(
+        session=session,
+        user_id=user_id,
+        project_id=project_id,
+        resource_id=resource_id,
+    )
+    statement = select(ResourceEditorState).where(
+        ResourceEditorState.user_id == user_id,
+        ResourceEditorState.resource_id == resource.id,
+    )
+    return session.exec(statement).first()
+
+
+def upsert_resource_editor_state(
+    *,
+    session: Session,
+    user_id: UUID,
+    project_id: str,
+    resource_id: str,
+    state_update: ResourceEditorStateUpdate,
+) -> ResourceEditorState:
+    resource = get_project_resource(
+        session=session,
+        user_id=user_id,
+        project_id=project_id,
+        resource_id=resource_id,
+    )
+    statement = select(ResourceEditorState).where(
+        ResourceEditorState.user_id == user_id,
+        ResourceEditorState.resource_id == resource.id,
+    )
+    editor_state = session.exec(statement).first()
+    next_values = state_update.model_dump()
+
+    if editor_state:
+        editor_state.sqlmodel_update(next_values)
+        editor_state.updated_at = utc_now()
+        session.add(editor_state)
+        session.commit()
+        session.refresh(editor_state)
+        return editor_state
+
+    editor_state = ResourceEditorState(
+        user_id=user_id,
+        resource_id=resource.id,
+        **next_values,
+    )
+    session.add(editor_state)
+    try:
+        session.commit()
+    except IntegrityError:
+        # Two open tabs may try to seed the same private state at once.
+        session.rollback()
+        editor_state = session.exec(statement).first()
+        if not editor_state:
+            raise
+        editor_state.sqlmodel_update(next_values)
+        editor_state.updated_at = utc_now()
+        session.add(editor_state)
+        session.commit()
+    session.refresh(editor_state)
+    return editor_state
 
 
 def list_project_access(
@@ -1407,6 +1480,9 @@ def delete_project_resource(
     if not resource or resource.project_id != project.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Resource not found")
 
+    session.exec(
+        delete(ResourceEditorState).where(ResourceEditorState.resource_id == resource.id),
+    )
     session.exec(delete(ResourceExport).where(ResourceExport.resource_id == resource.id))
     session.exec(delete(ResourceRevision).where(ResourceRevision.resource_id == resource.id))
     session.delete(resource)
