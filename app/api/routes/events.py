@@ -13,7 +13,14 @@ from sqlmodel import Session, select
 from app.api.deps import CookieCurrentUser, SessionDep
 from app.core.config import settings
 from app.core.security import create_supabase_realtime_token
-from app.models import RealtimeConfigPublic, RealtimeEventLog, RealtimeEventPublic
+from app.crud import get_project_with_access_or_404
+from app.models import (
+    RealtimeConfigPublic,
+    RealtimeEventLog,
+    RealtimeEventPublic,
+    RealtimePresenceConfigPublic,
+    RealtimePresenceUserPublic,
+)
 from app.realtime import realtime_broker
 
 router = APIRouter()
@@ -95,6 +102,37 @@ def get_realtime_config(
         expires_at=datetime.now(UTC) + expires_delta,
         channel=f"user:{current_user.id}",
         latest_event_id=current_event_id,
+    )
+
+
+@router.get("/presence/config", response_model=RealtimePresenceConfigPublic)
+def get_realtime_presence_config(
+    response: Response,
+    session: SessionDep,
+    current_user: CookieCurrentUser,
+    project_id: str = Query(min_length=1),
+) -> RealtimePresenceConfigPublic:
+    response.headers["Cache-Control"] = "no-store"
+    project, _access_role = get_project_with_access_or_404(
+        session=session,
+        user_id=current_user.id,
+        project_id=project_id,
+    )
+    if not settings.supabase_realtime_enabled:
+        return RealtimePresenceConfigPublic(enabled=False)
+
+    expires_delta = timedelta(minutes=max(1, settings.SUPABASE_REALTIME_TOKEN_MINUTES))
+    return RealtimePresenceConfigPublic(
+        enabled=True,
+        supabase_url=settings.SUPABASE_URL.rstrip("/"),
+        publishable_key=settings.SUPABASE_PUBLISHABLE_KEY,
+        access_token=create_supabase_realtime_token(
+            current_user.id,
+            expires_delta=expires_delta,
+        ),
+        expires_at=datetime.now(UTC) + expires_delta,
+        channel=f"project:{project.id}:presence",
+        user=RealtimePresenceUserPublic.model_validate(current_user),
     )
 
 

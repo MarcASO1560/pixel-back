@@ -134,6 +134,81 @@ def test_realtime_config_keeps_sse_fallback_when_supabase_is_incomplete(
     assert config.access_token is None
 
 
+def test_realtime_presence_config_is_scoped_to_an_accessible_project(monkeypatch) -> None:
+    user_id = uuid4()
+    project_id = uuid4()
+    current_user = SimpleNamespace(
+        id=user_id,
+        username="pixel_artist",
+        email="artist@example.com",
+        avatar_url="https://example.com/avatar.png",
+        avatar_pixel_art={"version": 1, "size": 1, "palette": [], "pixels": ["#fff"]},
+    )
+    monkeypatch.setattr(events.settings, "SUPABASE_URL", "https://project.supabase.co/")
+    monkeypatch.setattr(events.settings, "SUPABASE_PUBLISHABLE_KEY", "sb_publishable_test")
+    monkeypatch.setattr(
+        events.settings,
+        "SUPABASE_JWT_SECRET",
+        "realtime-signing-secret-long-enough",
+    )
+    access_checks: list[dict] = []
+
+    def check_access(**kwargs):
+        access_checks.append(kwargs)
+        return SimpleNamespace(id=project_id), "editor"
+
+    monkeypatch.setattr(
+        events,
+        "get_project_with_access_or_404",
+        check_access,
+    )
+
+    response = Response()
+    config = events.get_realtime_presence_config(
+        response=response,
+        session=object(),  # type: ignore[arg-type]
+        current_user=current_user,  # type: ignore[arg-type]
+        project_id=str(project_id),
+    )
+
+    assert access_checks[0]["user_id"] == user_id
+    assert access_checks[0]["project_id"] == str(project_id)
+    assert config.enabled is True
+    assert config.channel == f"project:{project_id}:presence"
+    assert config.user and config.user.id == user_id
+    assert config.user.username == "pixel_artist"
+    assert config.user.avatar_pixel_art == current_user.avatar_pixel_art
+    assert config.access_token
+    assert response.headers["cache-control"] == "no-store"
+
+
+def test_realtime_presence_config_still_checks_access_when_disabled(monkeypatch) -> None:
+    user_id = uuid4()
+    project_id = uuid4()
+    monkeypatch.setattr(events.settings, "SUPABASE_URL", None)
+    monkeypatch.setattr(events.settings, "SUPABASE_PUBLISHABLE_KEY", None)
+    monkeypatch.setattr(events.settings, "SUPABASE_JWT_SECRET", None)
+    access_checks: list[dict] = []
+
+    def check_access(**kwargs):
+        access_checks.append(kwargs)
+        return SimpleNamespace(id=project_id), "viewer"
+
+    monkeypatch.setattr(events, "get_project_with_access_or_404", check_access)
+
+    config = events.get_realtime_presence_config(
+        response=Response(),
+        session=object(),  # type: ignore[arg-type]
+        current_user=SimpleNamespace(id=user_id),  # type: ignore[arg-type]
+        project_id=str(project_id),
+    )
+
+    assert access_checks[0]["user_id"] == user_id
+    assert config.enabled is False
+    assert config.channel is None
+    assert config.user is None
+
+
 def test_supabase_realtime_token_requires_a_signing_secret(monkeypatch) -> None:
     monkeypatch.setattr(security.settings, "SUPABASE_JWT_SECRET", None)
 

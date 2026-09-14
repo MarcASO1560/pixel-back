@@ -209,6 +209,24 @@ class RealtimeConfigPublic(SQLModel):
     latest_event_id: int = 0
 
 
+class RealtimePresenceUserPublic(SQLModel):
+    id: UUID
+    username: str | None = None
+    email: EmailStr
+    avatar_url: str | None = None
+    avatar_pixel_art: dict[str, Any] | None = None
+
+
+class RealtimePresenceConfigPublic(SQLModel):
+    enabled: bool
+    supabase_url: str | None = None
+    publishable_key: str | None = None
+    access_token: str | None = None
+    expires_at: datetime | None = None
+    channel: str | None = None
+    user: RealtimePresenceUserPublic | None = None
+
+
 class RealtimeEventPublic(SQLModel):
     id: int
     event: str
