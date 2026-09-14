@@ -68,7 +68,9 @@ Para Supabase en Vercel, usa la conexion `Transaction pooler` del panel de Supab
 La sincronizacion en tiempo real usa Supabase Realtime Broadcast con canales privados por
 usuario. La presencia de editores usa un canal privado por proyecto y solo autoriza a su
 propietario y miembros; cada conexion anuncia el recurso que tiene abierto para mostrar los
-avatares activos en el explorador. `SUPABASE_PUBLISHABLE_KEY` es la clave publica del proyecto.
+avatares activos en el explorador. Ese mismo canal permite Broadcast privado entre miembros
+para cursores, selecciones, parches de pixeles y acciones consolidadas del editor colaborativo.
+`SUPABASE_PUBLISHABLE_KEY` es la clave publica del proyecto.
 `SUPABASE_JWT_SECRET` es el `Legacy JWT secret` del proyecto y nunca debe exponerse en el
 frontend. Tras configurar estas variables, ejecuta `alembic upgrade head` para instalar el
 trigger de Broadcast y su politica RLS. Si la configuracion no esta completa, el frontend
