@@ -76,6 +76,7 @@ class ResourceType(StrEnum):
     tileset = "tileset"
     music_track = "music_track"
     sound_effect = "sound_effect"
+    text = "text"
 
 
 class ExportKind(StrEnum):

@@ -780,6 +780,57 @@ def test_project_owner_can_persist_folder_and_resource_items() -> None:
         ] == [resource_id]
 
 
+def test_project_owner_can_create_and_read_text_resource() -> None:
+    with create_auth_client() as (client, _session):
+        owner_response = client.post(
+            "/api/v1/auth/register",
+            json={
+                "username": "text_owner",
+                "email": "text-items@example.com",
+                "password": "secret-pass",
+                "password_confirmation": "secret-pass",
+            },
+        )
+        owner_headers = {"Authorization": f"Bearer {owner_response.json()['access_token']}"}
+        project_response = client.post(
+            "/api/v1/projects/",
+            headers=owner_headers,
+            json={
+                "name": "Text project",
+                "description": None,
+                "settings": {},
+                "thumbnail_url": None,
+            },
+        )
+        project_id = project_response.json()["id"]
+
+        resource_response = client.post(
+            f"/api/v1/projects/{project_id}/resources",
+            headers=owner_headers,
+            json={
+                "name": "Untitled text",
+                "type": "text",
+                "resource_metadata": {"kind": "text"},
+                "thumbnail_url": None,
+                "color": "#f7f1e7",
+                "position": 1,
+                "folder_id": None,
+                "data": {},
+            },
+        )
+        resource_id = resource_response.json()["id"]
+        resource_detail_response = client.get(
+            f"/api/v1/projects/{project_id}/resources/{resource_id}",
+            headers=owner_headers,
+        )
+
+        assert resource_response.status_code == 200
+        assert resource_response.json()["type"] == "text"
+        assert resource_detail_response.status_code == 200
+        assert resource_detail_response.json()["type"] == "text"
+        assert resource_detail_response.json()["data"] == {}
+
+
 def test_resource_editor_state_is_private_per_user_and_available_to_viewers() -> None:
     with create_auth_client() as (client, session):
         owner_response = client.post(
