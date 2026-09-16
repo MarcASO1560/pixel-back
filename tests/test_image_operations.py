@@ -770,3 +770,42 @@ def test_imported_unicode_long_layer_id_remains_editable_without_reidentificatio
     )
     assert response.status_code == 200
     assert response.json()["resource"]["data"]["pixel_art"]["layers"][0]["id"] == identifier
+
+
+def test_oversized_canonical_acknowledgement_rejects_before_commit_or_receipt(
+    image_client, monkeypatch
+):
+    original = detail(image_client)
+    monkeypatch.setattr(image_operations, "MAX_CANONICAL_RESPONSE_BYTES", 16)
+    response = submit(image_client, pixel_packet("oversized-document"))
+    assert response.status_code == 413
+    assert response.json()["detail"]["code"] == "image_document_too_large"
+    assert response.json()["detail"]["current_revision"] == 0
+    assert "export a local JSON copy" in response.json()["detail"]["message"]
+    current = detail(image_client)
+    assert current["revision"] == original["revision"] == 0
+    assert current["updated_at"] == original["updated_at"]
+    assert current["data"] == original["data"]
+    assert image_client["session"].exec(select(ImageOperationReceipt)).all() == []
+    monkeypatch.setattr(image_operations, "MAX_CANONICAL_RESPONSE_BYTES", 4_000_000)
+    assert submit(image_client, pixel_packet("oversized-document")).status_code == 200
+
+
+def test_size_guard_counts_full_resource_metadata_and_multibyte_utf8(image_client, monkeypatch):
+    resource = image_client["resource"]
+    resource.resource_metadata = {"notes": "🖌️" * 200}
+    image_client["session"].add(resource)
+    image_client["session"].commit()
+    # The pixel document alone fits this bound. The metadata and UTF-8 bytes
+    # in the actual resource acknowledgement do not.
+    pixel_json_bytes = len(
+        image_operations.ImageDocument.model_validate(make_document())
+        .model_dump_json()
+        .encode("utf-8")
+    )
+    assert pixel_json_bytes < 1_000
+    monkeypatch.setattr(image_operations, "MAX_CANONICAL_RESPONSE_BYTES", 1_000)
+    response = submit(image_client, pixel_packet("utf8-overflow"))
+    assert response.status_code == 413
+    assert detail(image_client)["revision"] == 0
+    assert image_client["session"].exec(select(ImageOperationReceipt)).all() == []

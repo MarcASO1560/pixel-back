@@ -24,7 +24,10 @@ from app.time import utc_now
 MAX_LAYERS = 128
 MAX_ACTIONS = 256
 MAX_PIXEL_CHANGES = 262_144
-MAX_OPERATION_BYTES = 8 * 1024 * 1024
+MAX_OPERATION_BYTES = 3 * 1024 * 1024
+# Vercel limits both request and response payloads to 4.5 MB. Reserve room
+# below that limit for the complete canonical acknowledgement, not just pixels.
+MAX_CANONICAL_RESPONSE_BYTES = 4_000_000
 LEGACY_LAYER_ID = "legacy-layer-1"
 Color = Annotated[str, Field(pattern=r"^#[0-9A-Fa-f]{6}(?:[0-9A-Fa-f]{2})?$")] | None
 Identifier = Annotated[str, Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9_-]+$")]
@@ -170,7 +173,7 @@ class ImageOperationRequest(OperationModel):
         if pixel_changes > MAX_PIXEL_CHANGES:
             raise ValueError("Too many pixel changes in one packet")
         if len(self.model_dump_json().encode("utf-8")) > MAX_OPERATION_BYTES:
-            raise ValueError("Image operation must be at most 8 MiB")
+            raise ValueError("Image operation must be at most 3 MiB")
         return self
 
 
@@ -414,10 +417,39 @@ def submit_image_operation(
         if (document["width"], document["height"]) != (packet.width, packet.height):
             raise conflict("image_dimensions_conflict", resource, "The image was resized remotely")
         document = apply_actions(document, packet, resource)
-        resource.data = {**resource.data, "pixel_art": document}
-        resource.revision += 1
-        applied_revision = resource.revision
-        resource.updated_at = utc_now()
+        next_data = {**resource.data, "pixel_art": document}
+        applied_revision = resource.revision + 1
+        next_updated_at = utc_now()
+        # Verify the actual complete response BEFORE accepting or journalling
+        # the operation. Committing a document that the platform cannot return
+        # would strand retries behind a receipt with an undeliverable response.
+        response = ImageOperationResponse(
+            operation_id=packet.operation_id,
+            applied_revision=applied_revision,
+            resource=ProjectResourceDetail.model_validate(
+                resource,
+                update={
+                    "data": next_data,
+                    "revision": applied_revision,
+                    "updated_at": next_updated_at,
+                },
+            ),
+        )
+        if len(response.model_dump_json().encode("utf-8")) > MAX_CANONICAL_RESPONSE_BYTES:
+            raise HTTPException(
+                status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                detail={
+                    "code": "image_document_too_large",
+                    "current_revision": resource.revision,
+                    "message": (
+                        "This document exceeds the hosting size limit. Pending edits have not "
+                        "been accepted; keep them locally and export a local JSON copy."
+                    ),
+                },
+            )
+        resource.data = next_data
+        resource.revision = applied_revision
+        resource.updated_at = next_updated_at
         session.add(resource)
         session.add(
             ImageOperationReceipt(
@@ -429,12 +461,9 @@ def submit_image_operation(
             )
         )
         session.commit()
-        session.refresh(resource)
-        response = ImageOperationResponse(
-            operation_id=packet.operation_id,
-            applied_revision=applied_revision,
-            resource=ProjectResourceDetail.model_validate(resource),
-        )
+        # Return the acceptance-time canonical snapshot checked above. A later
+        # concurrent update must not change this packet's acknowledgement or
+        # bypass its serialized response-size check after the lock is released.
     except Exception:
         session.rollback()
         raise
