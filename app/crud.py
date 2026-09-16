@@ -15,6 +15,7 @@ from app.core.security import (
     verify_password,
 )
 from app.models import (
+    ImageOperationReceipt,
     PasswordCredential,
     PasswordResetConfirmCreate,
     PasswordResetRequestCreate,
@@ -1375,12 +1376,39 @@ def update_project_resource(
             detail="Resource not found",
         ) from None
 
-    resource = session.get(ProjectResource, parsed_resource_id)
+    # Old full-document saves and operation packets serialize on the same row.
+    # Otherwise a legacy tab could pass the journal guard before the first
+    # operation commits, then overwrite that accepted operation afterwards.
+    resource = session.exec(
+        select(ProjectResource)
+        .where(ProjectResource.id == parsed_resource_id, ProjectResource.project_id == project.id)
+        .with_for_update()
+        .execution_options(populate_existing=True),
+    ).first()
     if not resource or resource.project_id != project.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Resource not found")
 
     resource_data = resource_update.model_dump(exclude_unset=True)
     base_revision = resource_data.pop("base_revision", None)
+    if "data" in resource_data and resource_data["data"] != resource.data:
+        operation_receipt = session.exec(
+            select(ImageOperationReceipt.id)
+            .where(
+                ImageOperationReceipt.resource_id == resource.id,
+            )
+            .limit(1),
+        ).first()
+        if operation_receipt is not None and (
+            resource_data["data"].get("pixel_art") != resource.data.get("pixel_art")
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "image_operations_required",
+                    "current_revision": resource.revision,
+                    "message": "Refresh this tab to save images using collaborative operations",
+                },
+            )
     if base_revision is not None and base_revision != resource.revision:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,

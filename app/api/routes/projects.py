@@ -25,6 +25,11 @@ from app.crud import (
     update_project_resource,
     upsert_resource_editor_state,
 )
+from app.image_operations import (
+    ImageOperationRequest,
+    ImageOperationResponse,
+    submit_image_operation,
+)
 from app.models import (
     ProjectAccessUserPublic,
     ProjectCreate,
@@ -247,6 +252,26 @@ def read_resource_editor_state(
         user_id=current_user.id,
         project_id=project_id,
         resource_id=resource_id,
+    )
+
+
+@router.post(
+    "/{project_id}/resources/{resource_id}/image-operations",
+    response_model=ImageOperationResponse,
+)
+def apply_image_operation(
+    session: SessionDep,
+    current_user: CurrentUser,
+    project_id: str,
+    resource_id: str,
+    operation: ImageOperationRequest,
+) -> ImageOperationResponse:
+    return submit_image_operation(
+        session=session,
+        user_id=current_user.id,
+        project_id=project_id,
+        resource_id=resource_id,
+        packet=operation,
     )
 
 

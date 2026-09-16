@@ -16,6 +16,7 @@ from app.core.config import Settings
 from app.crud import create_password_reset_request, create_user
 from app.main import app
 from app.models import (
+    ImageOperationReceipt,
     PasswordCredential,
     PasswordResetRequestCreate,
     PasswordResetToken,
@@ -50,6 +51,7 @@ def create_auth_client() -> Generator[tuple[TestClient, Session], None, None]:
             ProjectFolder.__table__,
             ProjectMember.__table__,
             ProjectResource.__table__,
+            ImageOperationReceipt.__table__,
             ResourceEditorState.__table__,
             ProjectShareLink.__table__,
             ResourceExport.__table__,

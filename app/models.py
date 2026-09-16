@@ -454,6 +454,32 @@ class ProjectResourceDetail(ProjectResourcePublic):
     data: dict[str, Any]
 
 
+class ImageOperationReceipt(SQLModel, table=True):
+    """Durable acknowledgements committed with their canonical image update."""
+
+    __tablename__ = "image_operation_receipts"
+    __table_args__ = (
+        UniqueConstraint(
+            "resource_id",
+            "user_id",
+            "operation_id",
+            name="uq_image_operation_receipts_resource_user_operation",
+        ),
+    )
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    resource_id: UUID = Field(
+        foreign_key="project_resources.id",
+        index=True,
+        ondelete="CASCADE",
+    )
+    user_id: UUID = Field(foreign_key="users.id", index=True, ondelete="CASCADE")
+    operation_id: str = Field(max_length=80)
+    request_hash: str = Field(max_length=64)
+    applied_revision: int = Field(ge=0)
+    created_at: datetime = Field(default_factory=utc_now)
+
+
 class ResourceEditorStateUpdate(SQLModel):
     """Versioned, private editor state for one user and one resource."""
 
