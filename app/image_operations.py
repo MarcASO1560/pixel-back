@@ -12,10 +12,15 @@ from uuid import UUID
 from fastapi import HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, model_validator
 from sqlalchemy import delete, exists, func
-from sqlalchemy.orm import load_only
+from sqlalchemy.orm import aliased, load_only
 from sqlmodel import Session, select
 
-from app.crud import PROJECT_EDIT_ROLES, get_project_or_404, publish_project_event
+from app.crud import (
+    PROJECT_EDIT_ROLES,
+    get_project_or_404,
+    list_project_user_ids,
+    publish_project_event,
+)
 from app.models import (
     ImageCanvasTransform,
     ImageHistoryEntry,
@@ -484,28 +489,70 @@ def history_flags(entries: list[ImageHistoryEntry]) -> SharedImageHistory:
 
 
 def read_history_flags(session: Session, resource_id: UUID) -> SharedImageHistory:
-    # Polling tabs need two indexed existence checks, never compressed blobs.
+    # Both indexed existence checks share one round trip, never compressed blobs.
+    can_undo, can_redo = session.exec(
+        select(
+            exists().where(
+                ImageHistoryEntry.resource_id == resource_id,
+                ImageHistoryEntry.active.is_(True),
+            ),
+            exists().where(
+                ImageHistoryEntry.resource_id == resource_id,
+                ImageHistoryEntry.active.is_(False),
+            ),
+        )
+    ).one()
     return SharedImageHistory(
-        can_undo=bool(
-            session.exec(
-                select(
-                    exists().where(
-                        ImageHistoryEntry.resource_id == resource_id,
-                        ImageHistoryEntry.active.is_(True),
-                    )
-                )
-            ).one()
-        ),
-        can_redo=bool(
-            session.exec(
-                select(
-                    exists().where(
-                        ImageHistoryEntry.resource_id == resource_id,
-                        ImageHistoryEntry.active.is_(False),
-                    )
-                )
-            ).one()
-        ),
+        can_undo=bool(can_undo),
+        can_redo=bool(can_redo),
+    )
+
+
+def read_history_target(
+    session: Session, resource_id: UUID, *, undo: bool
+) -> tuple[ImageHistoryEntry | None, SharedImageHistory]:
+    # The resource row is already locked. Select only the latest eligible entry
+    # and the exact snapshot this command restores; never transfer every blob
+    # or make a separate lazy-load round trip for the selected snapshot.
+    candidate = aliased(ImageHistoryEntry)
+    remaining = aliased(ImageHistoryEntry)
+    ordering = (
+        [candidate.applied_revision.desc()]
+        if undo
+        else [
+            func.coalesce(candidate.undone_at_revision, 0).desc(),
+            candidate.applied_revision.asc(),
+        ]
+    )
+    selected = session.exec(
+        select(
+            candidate,
+            exists().where(
+                remaining.resource_id == resource_id,
+                remaining.active.is_(undo),
+                remaining.id != candidate.id,
+            ),
+        )
+        .options(
+            load_only(
+                candidate.id,
+                candidate.transforms,
+                candidate.active,
+                candidate.undone_at_revision,
+                candidate.before_document if undo else candidate.after_document,
+            )
+        )
+        .where(candidate.resource_id == resource_id, candidate.active.is_(undo))
+        .order_by(*ordering)
+        .limit(1)
+    ).first()
+    if selected is None:
+        # No-op commands still report any entries on the opposite stack.
+        return None, read_history_flags(session, resource_id)
+    target, has_remaining = selected
+    return target, SharedImageHistory(
+        can_undo=bool(has_remaining) if undo else True,
+        can_redo=True if undo else bool(has_remaining),
     )
 
 
@@ -790,27 +837,22 @@ def submit_image_operation(
                 "resource_revision_conflict", resource, "Packet revision is ahead of the server"
             )
         before = normalize_document_palette(canonical_document(resource))
-        entries = history_entries(session, resource.id)
         state = session.get(ImageHistoryState, resource.id)
         action = packet.actions[0]
+        entries: list[ImageHistoryEntry] = []
         target: ImageHistoryEntry | None = None
         geometry: list[dict[str, int]] = []
         kind = "edit"
-        flags = history_flags(entries)
+        if isinstance(action, (UndoAction, RedoAction)):
+            target, flags = read_history_target(
+                session, resource.id, undo=isinstance(action, UndoAction)
+            )
+        else:
+            entries = history_entries(session, resource.id)
+            flags = history_flags(entries)
         if isinstance(action, (UndoAction, RedoAction)):
             kind = action.type
-            eligible = [
-                entry for entry in entries if entry.active == isinstance(action, UndoAction)
-            ]
-            if eligible:
-                target = max(
-                    eligible,
-                    key=lambda entry: (
-                        entry.applied_revision
-                        if isinstance(action, UndoAction)
-                        else entry.undone_at_revision or 0
-                    ),
-                )
+            if target is not None:
                 document = decompress_document(
                     target.before_document
                     if isinstance(action, UndoAction)
@@ -820,14 +862,6 @@ def submit_image_operation(
                     [inverse_transform(transform) for transform in reversed(target.transforms)]
                     if isinstance(action, UndoAction)
                     else deepcopy(target.transforms)
-                )
-                flags = SharedImageHistory(
-                    can_undo=any(entry.active and entry.id != target.id for entry in entries)
-                    if isinstance(action, UndoAction)
-                    else True,
-                    can_redo=True
-                    if isinstance(action, UndoAction)
-                    else any(not entry.active and entry.id != target.id for entry in entries),
                 )
             else:
                 document = deepcopy(before)
@@ -1025,6 +1059,12 @@ def submit_image_operation(
                 action_kind=kind,
             )
         )
+        # Capture notification identifiers/recipients while the project fence
+        # and loaded ORM rows are still valid. commit() expires rows; reading
+        # resource.id afterwards would otherwise reload its entire image JSON.
+        accepted_project_id = project.id
+        accepted_resource_id = resource.id
+        event_user_ids = list_project_user_ids(session=session, project_id=accepted_project_id)
         session.commit()
         # Return the acceptance-time canonical snapshot checked above. A later
         # concurrent update must not change this packet's acknowledgement or
@@ -1034,11 +1074,12 @@ def submit_image_operation(
         raise
     publish_project_event(
         session=session,
-        project_id=project.id,
+        project_id=accepted_project_id,
         event="project.updated",
         actor_id=user_id,
+        user_ids=event_user_ids,
         extra={
-            "resource_id": str(resource.id),
+            "resource_id": str(accepted_resource_id),
             "revision": response.applied_revision,
             "operation_id": packet.operation_id,
         },

@@ -440,6 +440,88 @@ def test_polling_and_normal_edits_do_not_fetch_history_snapshot_blobs(image_clie
     )
 
 
+def test_polling_reads_both_history_flags_in_one_query(image_client):
+    assert submit(image_client, pixel_packet("paint")).status_code == 200
+    statements = []
+    engine = image_client["session"].get_bind()
+
+    def capture(_connection, _cursor, statement, _parameters, _context, _executemany):
+        statements.append(statement.lower())
+
+    event.listen(engine, "before_cursor_execute", capture)
+    try:
+        response = state(image_client)
+    finally:
+        event.remove(engine, "before_cursor_execute", capture)
+    assert response.status_code == 200
+    assert response.json()["history"] == {"can_undo": True, "can_redo": False}
+    history_selects = [
+        statement
+        for statement in statements
+        if statement.lstrip().startswith("select") and "image_history_entries" in statement
+    ]
+    assert len(history_selects) == 1
+    assert history_selects[0].count("exists (") == 2
+    assert "before_document" not in history_selects[0]
+    assert "after_document" not in history_selects[0]
+
+
+@pytest.mark.parametrize("kind", ["undo", "redo"])
+def test_history_command_fetches_only_target_snapshot_without_postcommit_image_reload(
+    image_client, kind
+):
+    assert submit(image_client, pixel_packet("paint-a")).status_code == 200
+    assert submit(image_client, pixel_packet("paint-b", 1, "#00FF00")).status_code == 200
+    if kind == "redo":
+        assert submit(image_client, history_action("prepare-redo", "undo")).status_code == 200
+    statements = []
+    engine = image_client["session"].get_bind()
+
+    def capture(_connection, _cursor, statement, _parameters, _context, _executemany):
+        statements.append(statement.lower())
+
+    event.listen(engine, "before_cursor_execute", capture)
+    try:
+        response = submit(image_client, history_action("command", kind))
+    finally:
+        event.remove(engine, "before_cursor_execute", capture)
+    assert response.status_code == 200
+    history_selects = [
+        statement
+        for statement in statements
+        if statement.lstrip().startswith("select") and "image_history_entries" in statement
+    ]
+    assert len(history_selects) == 1
+    assert "limit" in history_selects[0]
+    restored_blob = "before_document" if kind == "undo" else "after_document"
+    unused_blob = "after_document" if kind == "undo" else "before_document"
+    assert restored_blob in history_selects[0]
+    assert unused_blob not in history_selects[0]
+    for table in ["projects", "project_resources"]:
+        assert len(
+            [
+                statement
+                for statement in statements
+                if statement.lstrip().startswith("select") and f"from {table}" in statement
+            ]
+        ) == 1
+
+
+def test_noop_history_commands_preserve_opposite_stack_flags(image_client):
+    empty = submit(image_client, history_action("empty-undo", "undo"))
+    assert empty.status_code == 200
+    assert empty.json()["history"] == {"can_undo": False, "can_redo": False}
+    assert submit(image_client, pixel_packet("paint")).status_code == 200
+    assert submit(image_client, history_action("undo", "undo")).status_code == 200
+    empty_undo = submit(image_client, history_action("no-more-undo", "undo"))
+    assert empty_undo.status_code == 200
+    assert empty_undo.json()["history"] == {"can_undo": False, "can_redo": True}
+    assert submit(image_client, history_action("redo", "redo")).status_code == 200
+    empty_redo = submit(image_client, history_action("no-more-redo", "redo"))
+    assert empty_redo.status_code == 200
+    assert empty_redo.json()["history"] == {"can_undo": True, "can_redo": False}
+
+
 def test_history_byte_cap_evicts_old_snapshots_but_preserves_latest_undo(image_client, monkeypatch):
     monkeypatch.setattr(image_operations, "MAX_HISTORY_BYTES", 1)
     assert submit(image_client, pixel_packet("first")).status_code == 200
