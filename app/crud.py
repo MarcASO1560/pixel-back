@@ -14,6 +14,7 @@ from app.core.security import (
     get_password_reset_token_hash,
     verify_password,
 )
+from app.image_pixel_codec import compact_resource_data
 from app.models import (
     ImageOperationReceipt,
     PasswordCredential,
@@ -1544,7 +1545,18 @@ def create_project_resource(
                 detail="Folder not found in this project",
             )
 
-    resource = ProjectResource.model_validate(resource_create, update={"project_id": project.id})
+    data = resource_create.data
+    if resource_create.type in ("pixel_art", "tileset"):
+        try:
+            data = compact_resource_data(data)
+        except (ValueError, TypeError) as error:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Image data cannot be encoded safely",
+            ) from error
+    resource = ProjectResource.model_validate(
+        resource_create, update={"project_id": project.id, "data": data}
+    )
     session.add(resource)
     session.commit()
     session.refresh(resource)

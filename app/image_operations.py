@@ -10,7 +10,15 @@ from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictInt,
+    field_validator,
+    model_validator,
+)
 from sqlalchemy import delete, exists, func
 from sqlalchemy.orm import aliased, load_only
 from sqlmodel import Session, select
@@ -20,6 +28,15 @@ from app.crud import (
     get_project_or_404,
     list_project_user_ids,
     publish_project_event,
+)
+from app.image_pixel_codec import (
+    MAX_CANVAS_PIXELS,
+    MAX_DOCUMENT_PIXELS,
+    MAX_IMAGE_DIMENSION,
+    canvas_pixel_count,
+    compact_document,
+    decode_document,
+    decode_pixels,
 )
 from app.models import (
     ImageCanvasTransform,
@@ -47,8 +64,8 @@ Identifier = Annotated[str, Field(min_length=1, max_length=80, pattern=r"^[A-Za-
 # Existing imported v2 documents allow arbitrary nonblank Unicode layer IDs.
 # Bound incoming packets by total bytes rather than rejecting their identities.
 LayerIdentifier = Annotated[str, Field(min_length=1, pattern=r"\S")]
-Dimension = Annotated[StrictInt, Field(ge=1, le=256)]
-PixelIndex = Annotated[StrictInt, Field(ge=0, le=65_535)]
+Dimension = Annotated[StrictInt, Field(ge=1, le=MAX_IMAGE_DIMENSION)]
+PixelIndex = Annotated[StrictInt, Field(ge=0, lt=MAX_CANVAS_PIXELS)]
 PixelChange = tuple[PixelIndex, Color] | tuple[PixelIndex, Color, Color]
 
 
@@ -62,7 +79,12 @@ class ImageLayer(OperationModel):
     visible: StrictBool
     locked: StrictBool
     opacity: float = Field(ge=0, le=1, allow_inf_nan=False)
-    pixels: list[Color] = Field(min_length=1, max_length=65_536)
+    pixels: list[Color] = Field(min_length=1, max_length=MAX_CANVAS_PIXELS)
+
+    @field_validator("pixels", mode="before")
+    @classmethod
+    def decode_compact_pixels(cls, value: Any) -> Any:
+        return decode_pixels(value) if isinstance(value, dict) else value
 
 
 class ImageDocument(OperationModel):
@@ -75,8 +97,16 @@ class ImageDocument(OperationModel):
     palette: list[Annotated[str, Field(pattern=r"^#[0-9A-Fa-f]{6}(?:[0-9A-Fa-f]{2})?$")]]
     layers: list[ImageLayer] = Field(min_length=1, max_length=MAX_LAYERS)
 
+    @model_validator(mode="before")
+    @classmethod
+    def decode_compact_document(cls, value: Any) -> Any:
+        return decode_document(value)
+
     @model_validator(mode="after")
     def validate_layers(self) -> "ImageDocument":
+        canvas_pixel_count(self.width, self.height)
+        if len(self.layers) * self.width * self.height > MAX_DOCUMENT_PIXELS:
+            raise ValueError("Image layers exceed the supported document pixel budget")
         if len({layer.id for layer in self.layers}) != len(self.layers):
             raise ValueError("Layer identifiers must be unique")
         if any(len(layer.pixels) != self.width * self.height for layer in self.layers):
@@ -172,6 +202,11 @@ class ResizeAction(OperationModel):
     height: Dimension
     anchor: ResizeAnchor
 
+    @model_validator(mode="after")
+    def validate_canvas_budget(self) -> "ResizeAction":
+        canvas_pixel_count(self.width, self.height)
+        return self
+
 
 class UndoAction(OperationModel):
     type: Literal["undo"]
@@ -205,8 +240,51 @@ class ImageOperationRequest(OperationModel):
     coordinate_after_operation_id: Identifier | None = None
     actions: list[ImageAction] = Field(min_length=1, max_length=MAX_ACTIONS)
 
+    @model_validator(mode="before")
+    @classmethod
+    def decode_layer_snapshots(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        count = canvas_pixel_count(value.get("width"), value.get("height"))
+        actions = value.get("actions")
+        if not isinstance(actions, list):
+            return value
+        if len(actions) > MAX_ACTIONS:
+            raise ValueError("Too many actions in one image operation")
+        # Budget the entire packet before inflating any snapshot. Per-layer
+        # validation alone permits hundreds of tiny compressed blank buffers
+        # to expand into gigabytes before the document's layer limit runs.
+        snapshot_pixels = 0
+        for action in actions:
+            if not isinstance(action, dict):
+                continue
+            for field in ("layer", "expected_layer"):
+                if isinstance(action.get(field), dict):
+                    snapshot_pixels += count
+            document = action.get("document")
+            if isinstance(document, dict):
+                document_count = canvas_pixel_count(document.get("width"), document.get("height"))
+                layers = document.get("layers")
+                if isinstance(layers, list):
+                    snapshot_pixels += document_count * len(layers)
+            if snapshot_pixels > MAX_DOCUMENT_PIXELS:
+                raise pixel_budget_error()
+        copied = []
+        for action in actions:
+            if not isinstance(action, dict):
+                copied.append(action)
+                continue
+            action = dict(action)
+            for field in ("layer", "expected_layer"):
+                layer = action.get(field)
+                if isinstance(layer, dict) and isinstance(layer.get("pixels"), dict):
+                    action[field] = {**layer, "pixels": decode_pixels(layer["pixels"], count)}
+            copied.append(action)
+        return {**value, "actions": copied}
+
     @model_validator(mode="after")
     def validate_packet(self) -> "ImageOperationRequest":
+        canvas_pixel_count(self.width, self.height)
         if (
             any(
                 isinstance(action, (ReplaceAction, ResizeAction, UndoAction, RedoAction))
@@ -231,7 +309,18 @@ class ImageOperationRequest(OperationModel):
                     raise ValueError("Expected layer must contain exactly width * height pixels")
         if pixel_changes > MAX_PIXEL_CHANGES:
             raise ValueError("Too many pixel changes in one packet")
-        if len(self.model_dump_json().encode("utf-8")) > MAX_OPERATION_BYTES:
+        packed = self.model_dump(mode="json")
+        for action in packed["actions"]:
+            if "document" in action:
+                action["document"] = compact_document(action["document"])
+            for field in ("layer", "expected_layer"):
+                if field in action and action[field] is not None:
+                    document = {"version": 2, "layers": [action[field]]}
+                    action[field] = compact_document(document)["layers"][0]
+        if (
+            len(json.dumps(packed, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+            > MAX_OPERATION_BYTES
+        ):
             raise ValueError("Image operation must be at most 3 MiB")
         return self
 
@@ -271,6 +360,16 @@ def conflict(code: str, resource: ProjectResource, message: str) -> HTTPExceptio
     )
 
 
+def pixel_budget_error(resource: ProjectResource | None = None) -> HTTPException:
+    detail: dict[str, Any] = {
+        "code": "image_document_pixel_limit",
+        "message": "Image layers exceed the supported document pixel budget",
+    }
+    if resource is not None:
+        detail["current_revision"] = resource.revision
+    return HTTPException(status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail=detail)
+
+
 def normalize_color(value: Any) -> str | None:
     if isinstance(value, str) and re.fullmatch(
         r"#[0-9A-Fa-f]{6}(?:[0-9A-Fa-f]{2})?", value.strip()
@@ -282,7 +381,11 @@ def normalize_color(value: Any) -> str | None:
 def legacy_dimension(value: Any) -> int:
     try:
         numeric = float(value)
-        return min(256, max(1, math.floor(numeric + 0.5))) if math.isfinite(numeric) else 32
+        return (
+            min(MAX_IMAGE_DIMENSION, max(1, math.floor(numeric + 0.5)))
+            if math.isfinite(numeric)
+            else 32
+        )
     except (TypeError, ValueError):
         return 32
 
@@ -294,6 +397,13 @@ def canonical_document(resource: ProjectResource) -> dict[str, Any]:
         raise conflict("image_document_invalid", resource, "Stored image data is not an object")
     version = payload.get("version")
     if version == 2:
+        layers = payload.get("layers")
+        try:
+            count = canvas_pixel_count(payload.get("width"), payload.get("height"))
+        except ValueError as error:
+            raise pixel_budget_error(resource) from error
+        if isinstance(layers, list) and count * len(layers) > MAX_DOCUMENT_PIXELS:
+            raise pixel_budget_error(resource)
         try:
             return ImageDocument.model_validate(payload).model_dump(mode="json")
         except ValueError as error:
@@ -308,6 +418,10 @@ def canonical_document(resource: ProjectResource) -> dict[str, Any]:
     height = legacy_dimension(
         payload.get("height") if payload.get("height") is not None else payload.get("size", 32)
     )
+    try:
+        canvas_pixel_count(width, height)
+    except ValueError as error:
+        raise pixel_budget_error(resource) from error
     pixels = payload.get("pixels", [])
     pixels = pixels if isinstance(pixels, list) else []
     return {
@@ -427,6 +541,9 @@ def transform_packet(
 
 
 def resize_document(document: dict[str, Any], transform: dict[str, int]) -> dict[str, Any]:
+    count = canvas_pixel_count(transform["to_width"], transform["to_height"])
+    if count * len(document["layers"]) > MAX_DOCUMENT_PIXELS:
+        raise ValueError("Image layers exceed the supported document pixel budget")
     resized = deepcopy(document)
     resized["width"], resized["height"] = transform["to_width"], transform["to_height"]
     for layer in resized["layers"]:
@@ -436,8 +553,17 @@ def resize_document(document: dict[str, Any], transform: dict[str, int]) -> dict
 
 def normalize_document_palette(document: dict[str, Any]) -> dict[str, Any]:
     colors: dict[str, None] = {}
+    normalized: dict[Any, str | None] = {None: None}
     for layer in document["layers"]:
-        layer["pixels"] = [normalize_color(pixel) for pixel in layer["pixels"]]
+        pixels = []
+        for pixel in layer["pixels"]:
+            if isinstance(pixel, (str, type(None))):
+                if pixel not in normalized:
+                    normalized[pixel] = normalize_color(pixel)
+                pixels.append(normalized[pixel])
+            else:
+                pixels.append(normalize_color(pixel))
+        layer["pixels"] = pixels
         for color in layer["pixels"]:
             if color is not None:
                 colors[color] = None
@@ -447,12 +573,14 @@ def normalize_document_palette(document: dict[str, Any]) -> dict[str, Any]:
 
 def compress_document(document: dict[str, Any]) -> bytes:
     return zlib.compress(
-        json.dumps(document, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        json.dumps(compact_document(document), ensure_ascii=False, separators=(",", ":")).encode(
+            "utf-8"
+        )
     )
 
 
 def decompress_document(document: bytes) -> dict[str, Any]:
-    return json.loads(zlib.decompress(document))
+    return decode_document(json.loads(zlib.decompress(document)))
 
 
 def history_entries(session: Session, resource_id: UUID) -> list[ImageHistoryEntry]:
@@ -679,6 +807,10 @@ def apply_actions(
                 )
             if len(document["layers"]) >= MAX_LAYERS:
                 raise conflict("image_layer_limit", resource, "The image already has 128 layers")
+            if (len(document["layers"]) + 1) * document["width"] * document[
+                "height"
+            ] > MAX_DOCUMENT_PIXELS:
+                raise pixel_budget_error(resource)
             index = 0
             if action.after_id is not None:
                 after = find_layer(action.after_id)
@@ -867,6 +999,8 @@ def submit_image_operation(
                 document = deepcopy(before)
         elif isinstance(action, ResizeAction):
             kind = "resize"
+            if action.width * action.height * len(before["layers"]) > MAX_DOCUMENT_PIXELS:
+                raise pixel_budget_error(resource)
             transform = resize_transform(before, action)
             document = resize_document(before, transform)
             # Identity events prove an accepted frame after a lost ACK, but
@@ -928,7 +1062,8 @@ def submit_image_operation(
         changed = document != before
         if changed and kind not in ("undo", "redo"):
             flags = SharedImageHistory(can_undo=True, can_redo=False)
-        next_data = {**resource.data, "pixel_art": document}
+        packed_document = compact_document(document)
+        next_data = {**resource.data, "pixel_art": packed_document}
         applied_revision = resource.revision + 1
         next_updated_at = utc_now()
         # Verify the actual complete response BEFORE accepting or journalling
@@ -987,7 +1122,7 @@ def submit_image_operation(
                 and state.last_action_revision == latest.latest_edit_revision
             )
             if can_group:
-                latest.after_document = compress_document(document)
+                latest.after_document = compress_document(packed_document)
                 latest.latest_edit_revision = applied_revision
                 entry = latest
             else:
@@ -999,7 +1134,7 @@ def submit_image_operation(
                     history_group_id=packet.history_group_id,
                     action_kind=kind,
                     before_document=compress_document(before),
-                    after_document=compress_document(document),
+                    after_document=compress_document(packed_document),
                     transforms=geometry,
                 )
                 session.add(entry)

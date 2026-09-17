@@ -5,11 +5,12 @@ from enum import StrEnum
 from typing import Any
 from uuid import UUID, uuid4
 
-from pydantic import ConfigDict, EmailStr, field_validator
+from pydantic import ConfigDict, EmailStr, field_serializer, field_validator
 from sqlalchemy import JSON, Column, DateTime, LargeBinary, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
+from app.image_pixel_codec import compact_resource_data
 from app.time import utc_now
 
 
@@ -487,6 +488,12 @@ class ProjectResourcePublic(ProjectResourceBase):
 
 class ProjectResourceDetail(ProjectResourcePublic):
     data: dict[str, Any]
+
+    @field_serializer("data")
+    def compact_image_snapshot(self, value: dict[str, Any]) -> dict[str, Any]:
+        if self.type in (ResourceType.pixel_art, ResourceType.tileset):
+            return compact_resource_data(value)
+        return value
 
 
 class ImageOperationReceipt(SQLModel, table=True):

@@ -456,7 +456,7 @@ def test_legacy_full_image_patch_is_blocked_after_operation_but_name_patch_works
         {"base_revision": True},
         {"base_revision": "0"},
         {"width": 0},
-        {"width": 257},
+        {"width": 4097},
         {"height": 1.5},
         {"actions": []},
         {"actions": [{"type": "pixels", "layer_id": "base", "changes": [[4, "#FF0000"]]}]},
