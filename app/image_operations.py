@@ -544,10 +544,15 @@ def resize_document(document: dict[str, Any], transform: dict[str, int]) -> dict
     count = canvas_pixel_count(transform["to_width"], transform["to_height"])
     if count * len(document["layers"]) > MAX_DOCUMENT_PIXELS:
         raise ValueError("Image layers exceed the supported document pixel budget")
-    resized = deepcopy(document)
-    resized["width"], resized["height"] = transform["to_width"], transform["to_height"]
-    for layer in resized["layers"]:
-        layer["pixels"] = map_pixel_array(layer["pixels"], [transform])
+    resized = {
+        **document,
+        "width": transform["to_width"],
+        "height": transform["to_height"],
+        "layers": [
+            {**layer, "pixels": map_pixel_array(layer["pixels"], [transform])}
+            for layer in document["layers"]
+        ],
+    }
     return normalize_document_palette(resized)
 
 
@@ -555,20 +560,59 @@ def normalize_document_palette(document: dict[str, Any]) -> dict[str, Any]:
     colors: dict[str, None] = {}
     normalized: dict[Any, str | None] = {None: None}
     for layer in document["layers"]:
-        pixels = []
-        for pixel in layer["pixels"]:
+        original_pixels = layer["pixels"]
+        pixels = original_pixels
+        for index, pixel in enumerate(original_pixels):
             if isinstance(pixel, (str, type(None))):
                 if pixel not in normalized:
                     normalized[pixel] = normalize_color(pixel)
-                pixels.append(normalized[pixel])
+                color = normalized[pixel]
             else:
-                pixels.append(normalize_color(pixel))
-        layer["pixels"] = pixels
-        for color in layer["pixels"]:
+                color = normalize_color(pixel)
+            if color != pixel:
+                if pixels is original_pixels:
+                    pixels = list(original_pixels)
+                pixels[index] = color
             if color is not None:
                 colors[color] = None
+        layer["pixels"] = pixels
     document["palette"] = list(colors)
     return document
+
+
+def canonical_history_source(
+    stored: Any, canonical: dict[str, Any], original_pixels: list[list[Any]]
+) -> dict[str, Any]:
+    """Reuse a validated snapshot only if normalization changed no semantics.
+
+    canonical_document has already validated and decoded every stored pixel.
+    Normalization preserves each original list only when every color is already
+    canonical. Header and layer-field comparisons additionally reject stale
+    palettes and any model coercion that would alter the historical snapshot.
+    """
+    if not isinstance(stored, dict) or stored.get("version") != 2:
+        return canonical
+    if {key: value for key, value in stored.items() if key != "layers"} != {
+        key: value for key, value in canonical.items() if key != "layers"
+    }:
+        return canonical
+    layers = stored.get("layers")
+    if (
+        not isinstance(layers, list)
+        or len(layers) != len(canonical["layers"])
+        or len(layers) != len(original_pixels)
+    ):
+        return canonical
+    for stored_layer, layer, pixels in zip(
+        layers, canonical["layers"], original_pixels, strict=True
+    ):
+        if layer["pixels"] is not pixels:
+            return canonical
+        if {key: value for key, value in stored_layer.items() if key != "pixels"} != {
+            key: value for key, value in layer.items() if key != "pixels"
+        }:
+            return canonical
+    return stored
 
 
 def compress_document(document: dict[str, Any]) -> bytes:
@@ -769,7 +813,8 @@ def apply_actions(
     packet: ImageOperationRequest,
     resource: ProjectResource,
 ) -> dict[str, Any]:
-    document = deepcopy(document)
+    document = {**document, "layers": [dict(layer) for layer in document["layers"]]}
+    owned_pixels: set[int] = set()
 
     def find_layer(layer_id: str) -> dict[str, Any] | None:
         for layer in document["layers"]:
@@ -786,6 +831,7 @@ def apply_actions(
                     "The image changed remotely; replacement requires an up-to-date revision",
                 )
             document = action.document.model_dump(mode="json")
+            owned_pixels = {id(layer) for layer in document["layers"]}
         elif isinstance(action, PixelsAction):
             layer = find_layer(action.layer_id)
             if layer is None:
@@ -796,7 +842,14 @@ def apply_actions(
                     change[2]
                 ):
                     continue
-                pixels[change[0]] = normalize_color(change[1])
+                color = normalize_color(change[1])
+                if pixels[change[0]] == color:
+                    continue
+                if id(layer) not in owned_pixels:
+                    pixels = list(pixels)
+                    layer["pixels"] = pixels
+                    owned_pixels.add(id(layer))
+                pixels[change[0]] = color
         elif isinstance(action, LayerAddAction):
             existing = find_layer(action.layer.id)
             if existing is not None:
@@ -819,7 +872,9 @@ def apply_actions(
                     if after is not None
                     else len(document["layers"])
                 )
-            document["layers"].insert(index, action.layer.model_dump(mode="json"))
+            added = action.layer.model_dump(mode="json")
+            document["layers"].insert(index, added)
+            owned_pixels.add(id(added))
         elif isinstance(action, LayerRemoveAction):
             if action.expected_layer is not None:
                 current = next(
@@ -968,7 +1023,12 @@ def submit_image_operation(
             raise conflict(
                 "resource_revision_conflict", resource, "Packet revision is ahead of the server"
             )
-        before = normalize_document_palette(canonical_document(resource))
+        before = canonical_document(resource)
+        original_pixels = [layer["pixels"] for layer in before["layers"]]
+        before = normalize_document_palette(before)
+        before_history_document = canonical_history_source(
+            resource.data.get("pixel_art", resource.data), before, original_pixels
+        )
         state = session.get(ImageHistoryState, resource.id)
         action = packet.actions[0]
         entries: list[ImageHistoryEntry] = []
@@ -1133,7 +1193,7 @@ def submit_image_operation(
                     latest_edit_revision=applied_revision,
                     history_group_id=packet.history_group_id,
                     action_kind=kind,
-                    before_document=compress_document(before),
+                    before_document=compress_document(before_history_document),
                     after_document=compress_document(packed_document),
                     transforms=geometry,
                 )
