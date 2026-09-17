@@ -1,12 +1,12 @@
 import json
 import re
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 from uuid import UUID, uuid4
 
 from pydantic import ConfigDict, EmailStr, field_validator
-from sqlalchemy import JSON, Column, LargeBinary, UniqueConstraint
+from sqlalchemy import JSON, Column, DateTime, LargeBinary, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
@@ -278,6 +278,7 @@ class Project(ProjectBase, table=True):
 
     id: UUID = Field(default_factory=uuid4, primary_key=True)
     owner_id: UUID = Field(foreign_key="users.id", index=True)
+    realtime_generation: UUID = Field(default_factory=uuid4)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
     last_opened_at: datetime | None = None
@@ -321,12 +322,26 @@ class ProjectShareLink(SQLModel, table=True):
     project_id: UUID = Field(foreign_key="projects.id", primary_key=True)
     token: str = Field(unique=True, index=True, max_length=128)
     role: str = Field(default=ProjectAccessRole.editor, max_length=20)
+    expires_at: datetime | None = Field(
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
+    )
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
 
 class ProjectShareLinkCreate(SQLModel):
     role: str = Field(default=ProjectAccessRole.editor, max_length=20)
+    expires_at: datetime | None = None
+    rotate_token: bool = False
+
+    @field_validator("expires_at")
+    @classmethod
+    def validate_expiration_timezone(cls, value: datetime | None) -> datetime | None:
+        if value is not None:
+            if value.tzinfo is None or value.utcoffset() is None:
+                raise ValueError("Expiration must include an explicit timezone")
+            return value.astimezone(UTC)
+        return None
 
 
 class ProjectShareLinkPublic(SQLModel):
@@ -334,8 +349,28 @@ class ProjectShareLinkPublic(SQLModel):
     token: str
     url: str
     role: str
+    expires_at: datetime | None
+    is_expired: bool
     created_at: datetime
     updated_at: datetime
+
+
+class ProjectBlockedUser(SQLModel, table=True):
+    __tablename__ = "project_blocked_users"
+
+    project_id: UUID = Field(foreign_key="projects.id", primary_key=True, ondelete="CASCADE")
+    user_id: UUID = Field(foreign_key="users.id", primary_key=True, index=True, ondelete="CASCADE")
+    blocked_by: UUID | None = Field(default=None, foreign_key="users.id", ondelete="SET NULL")
+    blocked_at: datetime = Field(default_factory=utc_now)
+
+
+class ProjectBlockedUserPublic(SQLModel):
+    id: UUID
+    username: str | None = None
+    email: EmailStr
+    avatar_url: str | None = None
+    avatar_pixel_art: dict[str, Any] | None = None
+    blocked_at: datetime
 
 
 class ProjectMemberUpdate(SQLModel):

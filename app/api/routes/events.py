@@ -131,7 +131,7 @@ def get_realtime_presence_config(
             expires_delta=expires_delta,
         ),
         expires_at=datetime.now(UTC) + expires_delta,
-        channel=f"project:{project.id}:presence",
+        channel=f"project:{project.id}:presence:{project.realtime_generation}",
         user=RealtimePresenceUserPublic.model_validate(current_user),
     )
 

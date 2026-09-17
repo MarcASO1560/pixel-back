@@ -137,6 +137,7 @@ def test_realtime_config_keeps_sse_fallback_when_supabase_is_incomplete(
 def test_realtime_presence_config_is_scoped_to_an_accessible_project(monkeypatch) -> None:
     user_id = uuid4()
     project_id = uuid4()
+    generation = uuid4()
     current_user = SimpleNamespace(
         id=user_id,
         username="pixel_artist",
@@ -155,7 +156,7 @@ def test_realtime_presence_config_is_scoped_to_an_accessible_project(monkeypatch
 
     def check_access(**kwargs):
         access_checks.append(kwargs)
-        return SimpleNamespace(id=project_id), "editor"
+        return SimpleNamespace(id=project_id, realtime_generation=generation), "editor"
 
     monkeypatch.setattr(
         events,
@@ -174,7 +175,7 @@ def test_realtime_presence_config_is_scoped_to_an_accessible_project(monkeypatch
     assert access_checks[0]["user_id"] == user_id
     assert access_checks[0]["project_id"] == str(project_id)
     assert config.enabled is True
-    assert config.channel == f"project:{project_id}:presence"
+    assert config.channel == f"project:{project_id}:presence:{generation}"
     assert config.user and config.user.id == user_id
     assert config.user.username == "pixel_artist"
     assert config.user.avatar_pixel_art == current_user.avatar_pixel_art

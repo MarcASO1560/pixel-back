@@ -3,6 +3,7 @@ from fastapi import APIRouter, Query, status
 from app.api.deps import CurrentUser, SessionDep
 from app.crud import (
     accept_project_share_link,
+    block_project_user,
     create_project,
     create_project_folder,
     create_project_resource,
@@ -17,8 +18,10 @@ from app.crud import (
     get_resource_editor_state,
     leave_project,
     list_project_access,
+    list_project_blocked_users,
     list_projects,
     remove_project_member,
+    unblock_project_user,
     update_project,
     update_project_folder,
     update_project_member_role,
@@ -34,6 +37,7 @@ from app.image_operations import (
 )
 from app.models import (
     ProjectAccessUserPublic,
+    ProjectBlockedUserPublic,
     ProjectCreate,
     ProjectFolderCreate,
     ProjectFolderPublic,
@@ -128,6 +132,51 @@ def create_share_link(
         user_id=current_user.id,
         project_id=project_id,
         share_link_create=share_link_in,
+    )
+
+
+@router.get("/{project_id}/blocked-users", response_model=list[ProjectBlockedUserPublic])
+def read_project_blocked_users(
+    session: SessionDep,
+    current_user: CurrentUser,
+    project_id: str,
+) -> list[ProjectBlockedUserPublic]:
+    return list_project_blocked_users(
+        session=session, user_id=current_user.id, project_id=project_id
+    )
+
+
+@router.post(
+    "/{project_id}/blocked-users/{blocked_user_id}", response_model=ProjectBlockedUserPublic
+)
+def add_project_blocked_user(
+    session: SessionDep,
+    current_user: CurrentUser,
+    project_id: str,
+    blocked_user_id: str,
+) -> ProjectBlockedUserPublic:
+    return block_project_user(
+        session=session,
+        user_id=current_user.id,
+        project_id=project_id,
+        blocked_user_id=blocked_user_id,
+    )
+
+
+@router.delete(
+    "/{project_id}/blocked-users/{blocked_user_id}", status_code=status.HTTP_204_NO_CONTENT
+)
+def delete_project_blocked_user(
+    session: SessionDep,
+    current_user: CurrentUser,
+    project_id: str,
+    blocked_user_id: str,
+) -> None:
+    unblock_project_user(
+        session=session,
+        user_id=current_user.id,
+        project_id=project_id,
+        blocked_user_id=blocked_user_id,
     )
 
 

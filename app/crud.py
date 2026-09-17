@@ -1,6 +1,6 @@
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from secrets import token_urlsafe
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import HTTPException, status
 from sqlalchemy import delete, func, update
@@ -23,6 +23,8 @@ from app.models import (
     Project,
     ProjectAccessRole,
     ProjectAccessUserPublic,
+    ProjectBlockedUser,
+    ProjectBlockedUserPublic,
     ProjectCreate,
     ProjectFolder,
     ProjectFolderCreate,
@@ -55,6 +57,7 @@ from app.time import utc_now
 
 PASSWORD_RESET_TOKEN_MINUTES = 30
 PROJECT_SHARE_TOKEN_BYTES = 24
+PROJECT_SHARE_DEFAULT_DAYS = 7
 PROJECT_ACCESS_ROLES = {role.value for role in ProjectAccessRole}
 PROJECT_SHARE_LINK_ROLES = {ProjectAccessRole.viewer.value, ProjectAccessRole.editor.value}
 PROJECT_EDIT_ROLES = {ProjectAccessRole.editor.value, ProjectAccessRole.owner.value}
@@ -82,7 +85,15 @@ def get_user_by_username(*, session: Session, username: str) -> User | None:
 
 def get_project_access_count(*, session: Session, project_id: UUID) -> int:
     member_count = session.exec(
-        select(func.count(ProjectMember.user_id)).where(ProjectMember.project_id == project_id),
+        select(func.count(ProjectMember.user_id)).where(
+            ProjectMember.project_id == project_id,
+            ~select(ProjectBlockedUser.user_id)
+            .where(
+                ProjectBlockedUser.project_id == project_id,
+                ProjectBlockedUser.user_id == ProjectMember.user_id,
+            )
+            .exists(),
+        ),
     ).one()
     return 1 + int(member_count)
 
@@ -103,7 +114,15 @@ def list_project_user_ids(*, session: Session, project_id: UUID) -> set[UUID]:
         return set()
 
     member_user_ids = session.exec(
-        select(ProjectMember.user_id).where(ProjectMember.project_id == project_id),
+        select(ProjectMember.user_id).where(
+            ProjectMember.project_id == project_id,
+            ~select(ProjectBlockedUser.user_id)
+            .where(
+                ProjectBlockedUser.project_id == project_id,
+                ProjectBlockedUser.user_id == ProjectMember.user_id,
+            )
+            .exists(),
+        ),
     ).all()
     return {project.owner_id, *member_user_ids}
 
@@ -162,9 +181,33 @@ def project_share_link_to_public(*, link: ProjectShareLink) -> ProjectShareLinkP
         token=link.token,
         url=f"{settings.FRONTEND_URL.rstrip('/')}/share/{link.token}",
         role=normalize_project_share_link_role(link.role),
+        expires_at=aware_utc(link.expires_at) if link.expires_at is not None else None,
+        is_expired=project_share_link_is_expired(link=link),
         created_at=link.created_at,
         updated_at=link.updated_at,
     )
+
+
+def aware_utc(value: datetime) -> datetime:
+    """Legacy timestamps and SQLite are naive UTC; API expiration is aware UTC."""
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+def project_share_link_is_expired(*, link: ProjectShareLink) -> bool:
+    return link.expires_at is not None and aware_utc(link.expires_at) <= aware_utc(utc_now())
+
+
+def ensure_project_user_not_blocked(*, session: Session, project_id: UUID, user_id: UUID) -> None:
+    blocked = session.exec(
+        select(ProjectBlockedUser).where(
+            ProjectBlockedUser.project_id == project_id, ProjectBlockedUser.user_id == user_id
+        )
+    ).first()
+    if blocked is not None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "project_user_blocked", "message": "You are blocked from this project"},
+        )
 
 
 def normalize_project_role(role: str) -> str:
@@ -206,7 +249,7 @@ def get_project_member(
         ProjectMember.project_id == project_id,
         ProjectMember.user_id == user_id,
     )
-    return session.exec(statement).first()
+    return session.exec(statement.execution_options(populate_existing=True)).first()
 
 
 def get_project_access_role(
@@ -215,6 +258,7 @@ def get_project_access_role(
     project: Project,
     user_id: UUID,
 ) -> str | None:
+    ensure_project_user_not_blocked(session=session, project_id=project.id, user_id=user_id)
     if project.owner_id == user_id:
         return ProjectAccessRole.owner.value
 
@@ -450,11 +494,19 @@ def confirm_password_reset(
 
 
 def list_projects(*, session: Session, user_id: UUID) -> list[ProjectPublic]:
-    owned_statement = select(Project).where(Project.owner_id == user_id)
+    not_blocked = (
+        ~select(ProjectBlockedUser.user_id)
+        .where(
+            ProjectBlockedUser.project_id == Project.id,
+            ProjectBlockedUser.user_id == user_id,
+        )
+        .exists()
+    )
+    owned_statement = select(Project).where(Project.owner_id == user_id, not_blocked)
     shared_statement = (
         select(Project, ProjectMember)
         .join(ProjectMember, ProjectMember.project_id == Project.id)
-        .where(ProjectMember.user_id == user_id)
+        .where(ProjectMember.user_id == user_id, not_blocked)
     )
 
     projects_by_id: dict[UUID, tuple[Project, str]] = {
@@ -471,7 +523,15 @@ def list_projects(*, session: Session, user_id: UUID) -> list[ProjectPublic]:
 
     member_count_statement = (
         select(ProjectMember.project_id, func.count(ProjectMember.user_id))
-        .where(ProjectMember.project_id.in_(projects_by_id))
+        .where(
+            ProjectMember.project_id.in_(projects_by_id),
+            ~select(ProjectBlockedUser.user_id)
+            .where(
+                ProjectBlockedUser.project_id == ProjectMember.project_id,
+                ProjectBlockedUser.user_id == ProjectMember.user_id,
+            )
+            .exists(),
+        )
         .group_by(ProjectMember.project_id)
     )
     member_counts = {
@@ -524,6 +584,7 @@ def update_project(
         user_id=user_id,
         project_id=project_id,
         required_roles=PROJECT_EDIT_ROLES,
+        lock=True,
     )
     project_data = project_update.model_dump(exclude_unset=True)
 
@@ -558,6 +619,7 @@ def delete_project(*, session: Session, user_id: UUID, project_id: str) -> None:
         user_id=user_id,
         project_id=project_id,
         required_roles=PROJECT_MANAGE_ROLES,
+        lock=True,
     )
     if get_project_access_count(session=session, project_id=project.id) > 1:
         raise HTTPException(
@@ -570,11 +632,14 @@ def delete_project(*, session: Session, user_id: UUID, project_id: str) -> None:
         ProjectResource.project_id == project.id
     )
     session.exec(delete(ResourceExport).where(ResourceExport.resource_id.in_(project_resource_ids)))
-    session.exec(delete(ResourceRevision).where(ResourceRevision.resource_id.in_(project_resource_ids)))
+    session.exec(
+        delete(ResourceRevision).where(ResourceRevision.resource_id.in_(project_resource_ids))
+    )
     session.exec(delete(ProjectResource).where(ProjectResource.project_id == project.id))
     session.exec(delete(ProjectFolder).where(ProjectFolder.project_id == project.id))
     session.exec(delete(ProjectMember).where(ProjectMember.project_id == project.id))
     session.exec(delete(ProjectShareLink).where(ProjectShareLink.project_id == project.id))
+    session.exec(delete(ProjectBlockedUser).where(ProjectBlockedUser.project_id == project.id))
     session.delete(project)
     session.commit()
     publish_project_event(
@@ -616,10 +681,19 @@ def get_project_with_access_or_404(
     user_id: UUID,
     project_id: str,
     required_roles: set[str] | None = None,
+    lock: bool = False,
 ) -> tuple[Project, str]:
     parsed_project_id = parse_project_id_or_404(project_id)
 
-    project = session.get(Project, parsed_project_id)
+    # Permissions stay valid until the transaction ends. Ordinary operations
+    # share this fence (independent canvases remain concurrent); access changes
+    # hold an exclusive project lock, always before any resource lock.
+    project = session.exec(
+        select(Project)
+        .where(Project.id == parsed_project_id)
+        .with_for_update(read=not lock)
+        .execution_options(populate_existing=True)
+    ).first()
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
 
@@ -642,12 +716,14 @@ def get_project_or_404(
     user_id: UUID,
     project_id: str,
     required_roles: set[str] | None = None,
+    lock: bool = False,
 ) -> Project:
     project, _access_role = get_project_with_access_or_404(
         session=session,
         user_id=user_id,
         project_id=project_id,
         required_roles=required_roles,
+        lock=lock,
     )
     return project
 
@@ -781,6 +857,11 @@ def upsert_resource_editor_state(
     except IntegrityError:
         # Two open tabs may try to seed the same private state at once.
         session.rollback()
+        # Rollback released the project permission fence. A block/removal may
+        # have committed in the meantime, so authorize again before retrying.
+        get_project_resource(
+            session=session, user_id=user_id, project_id=project_id, resource_id=resource_id
+        )
         editor_state = session.exec(statement).first()
         if not editor_state:
             raise
@@ -790,6 +871,129 @@ def upsert_resource_editor_state(
         session.commit()
     session.refresh(editor_state)
     return editor_state
+
+
+def project_blocked_user_to_public(
+    *, user: User, blocked: ProjectBlockedUser
+) -> ProjectBlockedUserPublic:
+    return ProjectBlockedUserPublic(
+        id=user.id,
+        username=user.username,
+        email=user.email,
+        avatar_url=user.avatar_url,
+        avatar_pixel_art=user.avatar_pixel_art,
+        blocked_at=aware_utc(blocked.blocked_at),
+    )
+
+
+def list_project_blocked_users(
+    *,
+    session: Session,
+    user_id: UUID,
+    project_id: str,
+) -> list[ProjectBlockedUserPublic]:
+    project = get_project_or_404(
+        session=session,
+        user_id=user_id,
+        project_id=project_id,
+        required_roles=PROJECT_MANAGE_ROLES,
+    )
+    statement = (
+        select(User, ProjectBlockedUser)
+        .join(ProjectBlockedUser, ProjectBlockedUser.user_id == User.id)
+        .where(ProjectBlockedUser.project_id == project.id)
+        .order_by(ProjectBlockedUser.blocked_at, User.email)
+    )
+    return [
+        project_blocked_user_to_public(user=user, blocked=blocked)
+        for user, blocked in session.exec(statement).all()
+    ]
+
+
+def block_project_user(
+    *,
+    session: Session,
+    user_id: UUID,
+    project_id: str,
+    blocked_user_id: str,
+) -> ProjectBlockedUserPublic:
+    project = get_project_or_404(
+        session=session,
+        user_id=user_id,
+        project_id=project_id,
+        required_roles=PROJECT_MANAGE_ROLES,
+        lock=True,
+    )
+    target_id = parse_project_id_or_404(blocked_user_id)
+    member = get_project_member(session=session, project_id=project.id, user_id=target_id)
+    if target_id in {user_id, project.owner_id} or (
+        member is not None and member.role == ProjectAccessRole.owner.value
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "project_block_owner_protected",
+                "message": "An owner must be demoted before they can be blocked",
+            },
+        )
+    blocked = session.get(ProjectBlockedUser, (project.id, target_id))
+    target = session.get(User, target_id)
+    if target is None or (blocked is None and member is None):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Project member not found"
+        )
+    changed = blocked is None or member is not None
+    user_ids = list_project_user_ids(session=session, project_id=project.id) | {target_id}
+    if blocked is None:
+        blocked = ProjectBlockedUser(project_id=project.id, user_id=target_id, blocked_by=user_id)
+        session.add(blocked)
+    if member is not None:
+        session.delete(member)
+    if changed:
+        project.realtime_generation = uuid4()
+        session.add(project)
+    result = project_blocked_user_to_public(user=target, blocked=blocked)
+    session.commit()
+    if changed:
+        for event in ("project.access.updated", "workspace.updated"):
+            publish_project_event(
+                session=session,
+                project_id=project.id,
+                event=event,
+                actor_id=user_id,
+                user_ids=user_ids,
+            )
+    return result
+
+
+def unblock_project_user(
+    *,
+    session: Session,
+    user_id: UUID,
+    project_id: str,
+    blocked_user_id: str,
+) -> None:
+    project = get_project_or_404(
+        session=session,
+        user_id=user_id,
+        project_id=project_id,
+        required_roles=PROJECT_MANAGE_ROLES,
+        lock=True,
+    )
+    target_id = parse_project_id_or_404(blocked_user_id)
+    blocked = session.get(ProjectBlockedUser, (project.id, target_id))
+    if blocked is not None:
+        user_ids = list_project_user_ids(session=session, project_id=project.id) | {target_id}
+        session.delete(blocked)
+        session.commit()
+        for event in ("project.access.updated", "workspace.updated"):
+            publish_project_event(
+                session=session,
+                project_id=project.id,
+                event=event,
+                actor_id=user_id,
+                user_ids=user_ids,
+            )
 
 
 def list_project_access(
@@ -815,7 +1019,15 @@ def list_project_access(
     statement = (
         select(User, ProjectMember)
         .join(ProjectMember, ProjectMember.user_id == User.id)
-        .where(ProjectMember.project_id == project.id)
+        .where(
+            ProjectMember.project_id == project.id,
+            ~select(ProjectBlockedUser.user_id)
+            .where(
+                ProjectBlockedUser.project_id == project.id,
+                ProjectBlockedUser.user_id == ProjectMember.user_id,
+            )
+            .exists(),
+        )
         .order_by(ProjectMember.created_at, User.username, User.email)
     )
 
@@ -852,13 +1064,49 @@ def get_or_create_project_share_link(
         user_id=user_id,
         project_id=project_id,
         required_roles=PROJECT_MANAGE_ROLES,
+        lock=True,
     )
+    link = session.exec(
+        select(ProjectShareLink)
+        .where(ProjectShareLink.project_id == project.id)
+        .execution_options(populate_existing=True)
+    ).first()
+    values = share_link_create or ProjectShareLinkCreate()
     role = normalize_project_share_role(
-        share_link_create.role
-        if share_link_create
-        else ProjectAccessRole.editor.value
+        values.role
+        if "role" in values.model_fields_set or link is None
+        else normalize_project_share_link_role(link.role)
     )
-    link = session.get(ProjectShareLink, project.id)
+    now = aware_utc(utc_now())
+    expiration_supplied = "expires_at" in values.model_fields_set
+    expires_at = (
+        values.expires_at
+        if expiration_supplied
+        else now + timedelta(days=PROJECT_SHARE_DEFAULT_DAYS)
+        if link is None or (values.rotate_token and project_share_link_is_expired(link=link))
+        else link.expires_at
+    )
+    if expiration_supplied and expires_at is not None and aware_utc(expires_at) <= now:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "share_link_expiration_invalid",
+                "message": "Expiration must be in the future",
+            },
+        )
+    if (
+        link is not None
+        and project_share_link_is_expired(link=link)
+        and expiration_supplied
+        and not values.rotate_token
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "share_link_rotation_required",
+                "message": "Renewing an expired link requires a new token",
+            },
+        )
     did_change = False
 
     if not link:
@@ -866,19 +1114,21 @@ def get_or_create_project_share_link(
             project_id=project.id,
             token=generate_project_share_token(session=session),
             role=role,
+            expires_at=expires_at,
         )
         session.add(link)
-        session.commit()
-        session.refresh(link)
         did_change = True
-    elif link.role != role:
+    elif link.role != role or expiration_supplied or values.rotate_token:
         link.role = role
+        link.expires_at = expires_at
+        if values.rotate_token:
+            link.token = generate_project_share_token(session=session)
         link.updated_at = utc_now()
         session.add(link)
-        session.commit()
-        session.refresh(link)
         did_change = True
 
+    result = project_share_link_to_public(link=link)
+    session.commit()
     if did_change:
         publish_project_event(
             session=session,
@@ -887,7 +1137,7 @@ def get_or_create_project_share_link(
             actor_id=user_id,
         )
 
-    return project_share_link_to_public(link=link)
+    return result
 
 
 def get_project_share_link(
@@ -917,6 +1167,7 @@ def disable_project_share_link(
         user_id=user_id,
         project_id=project_id,
         required_roles=PROJECT_MANAGE_ROLES,
+        lock=True,
     )
     link = session.get(ProjectShareLink, project.id)
     if link:
@@ -936,31 +1187,55 @@ def accept_project_share_link(
     user_id: UUID,
     token: str,
 ) -> ProjectPublic:
-    statement = select(ProjectShareLink).where(ProjectShareLink.token == token)
-    link = session.exec(statement).first()
-    if not link:
+    project_id = session.exec(
+        select(ProjectShareLink.project_id).where(ProjectShareLink.token == token)
+    ).first()
+    if project_id is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Share link not found",
         )
 
-    project = session.get(Project, link.project_id)
+    project = session.exec(
+        select(Project)
+        .where(Project.id == project_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    ).first()
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
 
+    link = session.exec(
+        select(ProjectShareLink)
+        .where(ProjectShareLink.project_id == project.id, ProjectShareLink.token == token)
+        .execution_options(populate_existing=True)
+    ).first()
+    if link is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Share link not found")
+    ensure_project_user_not_blocked(session=session, project_id=project.id, user_id=user_id)
+    if project_share_link_is_expired(link=link):
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail={"code": "share_link_expired", "message": "This share link has expired"},
+        )
     if project.owner_id == user_id:
-        return project_to_public(session=session, project=project, access_role="owner")
+        result = project_to_public(session=session, project=project, access_role="owner")
+        session.commit()
+        return result
 
     member = get_project_member(session=session, project_id=project.id, user_id=user_id)
-    if not member:
+    did_join = member is None
+    if did_join:
         member = ProjectMember(
             project_id=project.id,
             user_id=user_id,
             role=normalize_project_share_link_role(link.role),
         )
         session.add(member)
-        session.commit()
-        session.refresh(member)
+        session.flush()
+    result = project_to_public(session=session, project=project, access_role=member.role)
+    session.commit()
+    if did_join:
         publish_project_event(
             session=session,
             project_id=project.id,
@@ -974,7 +1249,7 @@ def accept_project_share_link(
             actor_id=user_id,
         )
 
-    return project_to_public(session=session, project=project, access_role=member.role)
+    return result
 
 
 def update_project_member_role(
@@ -990,6 +1265,7 @@ def update_project_member_role(
         user_id=user_id,
         project_id=project_id,
         required_roles=PROJECT_MANAGE_ROLES,
+        lock=True,
     )
     target_user_id = parse_project_id_or_404(member_user_id)
     target_user = session.get(User, target_user_id)
@@ -1102,6 +1378,7 @@ def remove_project_member(
         user_id=user_id,
         project_id=project_id,
         required_roles=PROJECT_MANAGE_ROLES,
+        lock=True,
     )
     target_user_id = parse_project_id_or_404(member_user_id)
     member = get_project_member(session=session, project_id=project.id, user_id=target_user_id)
@@ -1112,6 +1389,8 @@ def remove_project_member(
         )
 
     user_ids = list_project_user_ids(session=session, project_id=project.id)
+    project.realtime_generation = uuid4()
+    session.add(project)
     session.delete(member)
     session.commit()
     publish_project_event(
@@ -1136,7 +1415,7 @@ def leave_project(
     user_id: UUID,
     project_id: str,
 ) -> None:
-    project = get_project_or_404(session=session, user_id=user_id, project_id=project_id)
+    project = get_project_or_404(session=session, user_id=user_id, project_id=project_id, lock=True)
     if get_project_access_count(session=session, project_id=project.id) <= 1:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1144,6 +1423,8 @@ def leave_project(
         )
 
     user_ids = list_project_user_ids(session=session, project_id=project.id)
+    project.realtime_generation = uuid4()
+    session.add(project)
     if project.owner_id == user_id:
         members = session.exec(
             select(ProjectMember)
