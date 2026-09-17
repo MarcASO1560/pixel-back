@@ -6,7 +6,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from pydantic import ConfigDict, EmailStr, field_validator
-from sqlalchemy import JSON, Column, UniqueConstraint
+from sqlalchemy import JSON, Column, LargeBinary, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
@@ -477,6 +477,73 @@ class ImageOperationReceipt(SQLModel, table=True):
     operation_id: str = Field(max_length=80)
     request_hash: str = Field(max_length=64)
     applied_revision: int = Field(ge=0)
+    coordinate_width: int | None = None
+    coordinate_height: int | None = None
+    action_kind: str | None = Field(default=None, max_length=16)
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class ImageHistoryEntry(SQLModel, table=True):
+    """Compressed canonical snapshots in the shared, bounded undo stack."""
+
+    __tablename__ = "image_history_entries"
+    __table_args__ = (
+        UniqueConstraint("resource_id", "applied_revision", name="uq_image_history_revision"),
+    )
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    resource_id: UUID = Field(foreign_key="project_resources.id", index=True, ondelete="CASCADE")
+    user_id: UUID | None = Field(default=None, foreign_key="users.id", ondelete="SET NULL")
+    applied_revision: int
+    latest_edit_revision: int
+    history_group_id: str | None = Field(default=None, max_length=80)
+    action_kind: str = Field(max_length=16)
+    before_document: bytes = Field(sa_column=Column(LargeBinary, nullable=False))
+    after_document: bytes = Field(sa_column=Column(LargeBinary, nullable=False))
+    transforms: list[dict[str, Any]] = Field(default_factory=list, sa_column=jsonb_column())
+    active: bool = True
+    undone_at_revision: int | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class ImageHistoryState(SQLModel, table=True):
+    """Grouping barrier: any undo/redo or another editor breaks a gesture group."""
+
+    __tablename__ = "image_history_states"
+
+    resource_id: UUID = Field(
+        primary_key=True,
+        foreign_key="project_resources.id",
+        ondelete="CASCADE",
+    )
+    last_action_revision: int = 0
+    last_entry_id: UUID | None = Field(
+        default=None,
+        foreign_key="image_history_entries.id",
+        ondelete="SET NULL",
+    )
+
+
+class ImageCanvasTransform(SQLModel, table=True):
+    """Unpruned canvas lineage, independent of history eviction or user deletion."""
+
+    __tablename__ = "image_canvas_transforms"
+    __table_args__ = (
+        UniqueConstraint("resource_id", "revision", "position", name="uq_image_canvas_transform"),
+    )
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    resource_id: UUID = Field(foreign_key="project_resources.id", index=True, ondelete="CASCADE")
+    user_id: UUID | None = Field(default=None, foreign_key="users.id", ondelete="SET NULL")
+    operation_id: str = Field(max_length=80)
+    revision: int
+    position: int = 0
+    from_width: int
+    from_height: int
+    to_width: int
+    to_height: int
+    offset_x: int
+    offset_y: int
     created_at: datetime = Field(default_factory=utc_now)
 
 

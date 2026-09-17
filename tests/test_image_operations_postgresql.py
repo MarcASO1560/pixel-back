@@ -201,3 +201,81 @@ def test_locked_legacy_patch_cannot_overwrite_first_accepted_operation(local_pos
         resource = session.exec(select(ProjectResource)).one()
         assert resource.revision == 1
         assert resource.data["pixel_art"]["layers"][0]["pixels"] == ["#FF0000", None]
+
+
+def test_concurrent_semantic_resize_and_stale_pixels_preserve_both(local_postgres_image):
+    image = local_postgres_image
+    barrier = Barrier(2)
+    resize = ImageOperationRequest.model_validate(
+        {
+            "operation_id": "resize",
+            "base_revision": 0,
+            "width": 2,
+            "height": 1,
+            "actions": [{"type": "resize", "width": 3, "height": 2, "anchor": "center"}],
+        }
+    )
+
+    def send(packet):
+        with Session(image["engine"]) as session:
+            barrier.wait(timeout=10)
+            return submit_image_operation(
+                session=session,
+                user_id=image["user_id"],
+                project_id=image["project_id"],
+                resource_id=image["resource_id"],
+                packet=packet,
+            )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(send, resize),
+            executor.submit(send, operation("paint", 1, "#00FF00")),
+        ]
+        assert {future.result(timeout=20).applied_revision for future in futures} == {1, 2}
+    with Session(image["engine"]) as session:
+        resource = session.exec(select(ProjectResource)).one()
+        document = resource.data["pixel_art"]
+        assert (document["width"], document["height"]) == (3, 2)
+        assert document["layers"][0]["pixels"][5] == "#00FF00"
+
+
+def test_concurrent_global_undo_serializes_shared_history(local_postgres_image):
+    image = local_postgres_image
+    with Session(image["engine"]) as session:
+        for packet in [operation("paint-a", 0), operation("paint-b", 1, "#00FF00")]:
+            submit_image_operation(
+                session=session,
+                user_id=image["user_id"],
+                project_id=image["project_id"],
+                resource_id=image["resource_id"],
+                packet=packet,
+            )
+    barrier = Barrier(2)
+
+    def undo(identifier):
+        with Session(image["engine"]) as session:
+            barrier.wait(timeout=10)
+            packet = ImageOperationRequest.model_validate(
+                {
+                    "operation_id": identifier,
+                    "base_revision": 0,
+                    "width": 2,
+                    "height": 1,
+                    "actions": [{"type": "undo"}],
+                }
+            )
+            return submit_image_operation(
+                session=session,
+                user_id=image["user_id"],
+                project_id=image["project_id"],
+                resource_id=image["resource_id"],
+                packet=packet,
+            )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(undo, "undo-a"), executor.submit(undo, "undo-b")]
+        assert {future.result(timeout=20).applied_revision for future in futures} == {3, 4}
+    with Session(image["engine"]) as session:
+        resource = session.exec(select(ProjectResource)).one()
+        assert resource.data["pixel_art"]["layers"][0]["pixels"] == [None, None]

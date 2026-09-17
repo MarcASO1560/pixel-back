@@ -333,25 +333,23 @@ def test_add_and_reorder_retain_concurrently_added_layers(image_client):
 
 
 @pytest.mark.parametrize(
-    "action,code",
+    "action",
     [
-        (
-            {"type": "pixels", "layer_id": "missing", "changes": [[0, "#FF0000"]]},
-            "image_layer_missing",
-        ),
-        ({"type": "layer-remove", "layer_id": "base"}, "image_last_layer"),
-        ({"type": "layer-order", "layer_ids": ["missing"]}, "image_layer_missing"),
+        {"type": "pixels", "layer_id": "missing", "changes": [[0, "#FF0000"]]},
+        {"type": "layer-remove", "layer_id": "base"},
+        {"type": "layer-order", "layer_ids": ["missing"]},
     ],
 )
-def test_invalid_structural_actions_rollback_entire_packet(image_client, action, code):
+def test_concurrent_removed_layer_actions_skip_without_losing_other_packet_edits(
+    image_client, action
+):
     packet = pixel_packet("rollback", actions=[pixel_packet("unused")["actions"][0], action])
     response = submit(image_client, packet)
-    assert response.status_code == 409
-    assert response.json()["detail"]["code"] == code
+    assert response.status_code == 200
     current = detail(image_client)
-    assert current["revision"] == 0
-    assert current["data"]["pixel_art"]["layers"][0]["pixels"] == [None] * 4
-    assert image_client["session"].exec(select(ImageOperationReceipt)).all() == []
+    assert current["revision"] == 1
+    assert current["data"]["pixel_art"]["layers"][0]["pixels"] == ["#FF0000", None, None, None]
+    assert len(image_client["session"].exec(select(ImageOperationReceipt)).all()) == 1
 
 
 def test_missing_removed_layer_is_not_blindly_recreated(image_client):
@@ -380,14 +378,13 @@ def test_missing_removed_layer_is_not_blindly_recreated(image_client):
             actions=[{"type": "pixels", "layer_id": "temporary", "changes": [[0, "#FF0000"]]}],
         ),
     )
-    assert late.status_code == 409
-    assert late.json()["detail"]["code"] == "image_layer_missing"
+    assert late.status_code == 200
     assert [layer["id"] for layer in detail(image_client)["data"]["pixel_art"]["layers"]] == [
         "base"
     ]
 
 
-def test_resize_requires_fresh_revision_and_rejects_old_dimension_pixels(image_client):
+def test_legacy_replace_requires_fresh_revision_but_maps_later_old_dimension_pixels(image_client):
     assert submit(image_client, pixel_packet("paint")).status_code == 200
     stale = submit(
         image_client,
@@ -406,9 +403,9 @@ def test_resize_requires_fresh_revision_and_rejects_old_dimension_pixels(image_c
     )
     assert resized.status_code == 200
     old = submit(image_client, pixel_packet("old-paint"), "editor")
-    assert old.status_code == 409
-    assert old.json()["detail"]["code"] == "image_dimensions_conflict"
-    assert detail(image_client)["revision"] == 2
+    assert old.status_code == 200
+    assert detail(image_client)["revision"] == 3
+    assert detail(image_client)["data"]["pixel_art"]["layers"][0]["pixels"] == ["#FF0000"]
 
 
 def test_legacy_data_has_stable_layer_identity_and_preserves_pixels(image_client):

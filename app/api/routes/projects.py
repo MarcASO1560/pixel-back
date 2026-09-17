@@ -1,4 +1,4 @@
-from fastapi import APIRouter, status
+from fastapi import APIRouter, Query, status
 
 from app.api.deps import CurrentUser, SessionDep
 from app.crud import (
@@ -28,6 +28,8 @@ from app.crud import (
 from app.image_operations import (
     ImageOperationRequest,
     ImageOperationResponse,
+    ImageOperationState,
+    get_image_operation_state,
     submit_image_operation,
 )
 from app.models import (
@@ -272,6 +274,26 @@ def apply_image_operation(
         project_id=project_id,
         resource_id=resource_id,
         packet=operation,
+    )
+
+
+@router.get(
+    "/{project_id}/resources/{resource_id}/image-operations",
+    response_model=ImageOperationState,
+)
+def read_image_operation_state(
+    session: SessionDep,
+    current_user: CurrentUser,
+    project_id: str,
+    resource_id: str,
+    since_revision: int = Query(default=0, ge=0),
+) -> ImageOperationState:
+    return get_image_operation_state(
+        session=session,
+        user_id=current_user.id,
+        project_id=project_id,
+        resource_id=resource_id,
+        since_revision=since_revision,
     )
 
 
