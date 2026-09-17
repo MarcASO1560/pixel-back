@@ -65,6 +65,14 @@ El backend ya permite por defecto `localhost`, `sefkirastudio.com`, `www.sefkira
 
 Para Supabase en Vercel, usa la conexion `Transaction pooler` del panel de Supabase. Vercel es serverless, y Supabase recomienda ese modo para funciones temporales. El backend ya usa `NullPool` para no abrir un pool extra encima del pooler de Supabase y desactiva prepared statements para ser compatible con el pooler de transacciones.
 
+`vercel.json` fija una sola region `lhr1` (Londres, AWS `eu-west-2`), junto a la
+base de datos Supabase actual. El frontend tambien se ejecuta en esa region:
+su proxy HTTP no debe cruzar el Atlantico para llegar a la API. Si cambia la
+region de PostgreSQL, actualiza ambos archivos; no requiere multirregion ni
+cambiar el plan. El dibujo en vivo viaja por Broadcast directamente, sin esperar
+estas peticiones ni el guardado. Sus previews son solo visuales; las operaciones
+confirmadas, la cola durable y el historial compartido siguen siendo autoritativos.
+
 La sincronizacion en tiempo real usa Supabase Realtime Broadcast con canales privados por
 usuario. La presencia de editores usa un canal privado por proyecto y solo autoriza a su
 propietario y miembros; cada conexion anuncia el recurso que tiene abierto para mostrar los
