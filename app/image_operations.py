@@ -66,6 +66,7 @@ Identifier = Annotated[str, Field(min_length=1, max_length=80, pattern=r"^[A-Za-
 LayerIdentifier = Annotated[str, Field(min_length=1, pattern=r"\S")]
 Dimension = Annotated[StrictInt, Field(ge=1, le=MAX_IMAGE_DIMENSION)]
 PixelIndex = Annotated[StrictInt, Field(ge=0, lt=MAX_CANVAS_PIXELS)]
+PixelRunLength = Annotated[StrictInt, Field(ge=1, le=MAX_CANVAS_PIXELS)]
 PixelChange = tuple[PixelIndex, Color] | tuple[PixelIndex, Color, Color]
 
 
@@ -118,6 +119,22 @@ class PixelsAction(OperationModel):
     type: Literal["pixels"]
     layer_id: LayerIdentifier
     changes: list[PixelChange] = Field(min_length=1, max_length=65_536)
+
+
+class PixelRunsAction(OperationModel):
+    type: Literal["pixel-runs"]
+    layer_id: LayerIdentifier
+    color: Color
+    runs: list[tuple[PixelIndex, PixelRunLength]] = Field(min_length=1, max_length=65_536)
+
+    @model_validator(mode="after")
+    def validate_runs(self) -> "PixelRunsAction":
+        previous_end = 0
+        for start, length in self.runs:
+            if start < previous_end or start + length > MAX_CANVAS_PIXELS:
+                raise ValueError("Pixel runs must be sorted, disjoint and within the canvas budget")
+            previous_end = start + length
+        return self
 
 
 class LayerAddAction(OperationModel):
@@ -218,6 +235,7 @@ class RedoAction(OperationModel):
 
 ImageAction = Annotated[
     PixelsAction
+    | PixelRunsAction
     | LayerAddAction
     | LayerRemoveAction
     | LayerUpdateAction
@@ -296,11 +314,16 @@ class ImageOperationRequest(OperationModel):
                 "Replace, resize, undo and redo must be the only action in their packet"
             )
         pixel_changes = 0
+        run_pixels = 0
         for action in self.actions:
             if isinstance(action, PixelsAction):
                 pixel_changes += len(action.changes)
                 if any(change[0] >= self.width * self.height for change in action.changes):
                     raise ValueError("Pixel index is outside the packet dimensions")
+            elif isinstance(action, PixelRunsAction):
+                run_pixels += sum(length for _, length in action.runs)
+                if any(start + length > self.width * self.height for start, length in action.runs):
+                    raise ValueError("Pixel run is outside the packet dimensions")
             elif isinstance(action, LayerAddAction):
                 if len(action.layer.pixels) != self.width * self.height:
                     raise ValueError("Added layer must contain exactly width * height pixels")
@@ -309,6 +332,8 @@ class ImageOperationRequest(OperationModel):
                     raise ValueError("Expected layer must contain exactly width * height pixels")
         if pixel_changes > MAX_PIXEL_CHANGES:
             raise ValueError("Too many pixel changes in one packet")
+        if pixel_changes + run_pixels > MAX_CANVAS_PIXELS:
+            raise ValueError("Image operation exceeds the covered pixel budget")
         packed = self.model_dump(mode="json")
         for action in packed["actions"]:
             if "document" in action:
@@ -496,6 +521,36 @@ def map_pixel_array(pixels: list[Any], transforms: list[dict[str, int]]) -> list
     return mapped
 
 
+def map_pixel_runs(
+    runs: list[tuple[int, int]], transforms: list[dict[str, int]]
+) -> list[tuple[int, int]]:
+    """Map clipped row segments without allocating a tuple for every pixel."""
+    mapped = runs
+    for transform in transforms:
+        next_runs: list[tuple[int, int]] = []
+        source_width = transform["from_width"]
+        target_width = transform["to_width"]
+        for start, length in mapped:
+            end = start + length
+            while start < end:
+                row, column = divmod(start, source_width)
+                row_end = min(end, (row + 1) * source_width)
+                target_row = row + transform["offset_y"]
+                left = max(0, column + transform["offset_x"])
+                right = min(target_width, column + row_end - start + transform["offset_x"])
+                if 0 <= target_row < transform["to_height"] and left < right:
+                    target_start = target_row * target_width + left
+                    target_length = right - left
+                    if next_runs and next_runs[-1][0] + next_runs[-1][1] == target_start:
+                        previous_start, previous_length = next_runs[-1]
+                        next_runs[-1] = (previous_start, previous_length + target_length)
+                    else:
+                        next_runs.append((target_start, target_length))
+                start = row_end
+        mapped = next_runs
+    return mapped
+
+
 def transform_packet(
     packet: ImageOperationRequest,
     document: dict[str, Any],
@@ -526,6 +581,8 @@ def transform_packet(
                 if target is not None:
                     changes.append((target, *change[1:]))
             action = action.model_copy(update={"changes": changes})
+        elif isinstance(action, PixelRunsAction):
+            action = action.model_copy(update={"runs": map_pixel_runs(action.runs, transforms)})
         elif isinstance(action, LayerAddAction):
             layer = action.layer.model_copy(
                 update={"pixels": map_pixel_array(action.layer.pixels, transforms)}
@@ -850,6 +907,16 @@ def apply_actions(
                     layer["pixels"] = pixels
                     owned_pixels.add(id(layer))
                 pixels[change[0]] = color
+        elif isinstance(action, PixelRunsAction):
+            layer = find_layer(action.layer_id)
+            if layer is None or not action.runs:
+                continue
+            if id(layer) not in owned_pixels:
+                layer["pixels"] = list(layer["pixels"])
+                owned_pixels.add(id(layer))
+            color = normalize_color(action.color)
+            for start, length in action.runs:
+                layer["pixels"][start : start + length] = [color] * length
         elif isinstance(action, LayerAddAction):
             existing = find_layer(action.layer.id)
             if existing is not None:
