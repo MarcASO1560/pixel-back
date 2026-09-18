@@ -142,6 +142,135 @@ def test_rotate_expired_without_expiry_renews_seven_days(image_client, monkeypat
     assert accept(image, first["token"]).status_code == 404
 
 
+@pytest.mark.parametrize("role,status", [("editor", 403), ("viewer", 403), ("outsider", 404)])
+@pytest.mark.parametrize("method", ["GET", "POST", "DELETE"])
+def test_share_link_management_is_owner_only_and_rejection_preserves_link(
+    image_client, role, status, method
+):
+    image = image_client
+    original = share(image, {"role": "viewer", "expires_at": None}).json()
+    response = image["client"].request(
+        method,
+        project_url(image) + "/share-link",
+        headers=image["headers"][role],
+        **({"json": {"role": "editor", "rotate_token": True}} if method == "POST" else {}),
+    )
+    assert response.status_code == status
+    saved = image["client"].get(
+        project_url(image) + "/share-link", headers=image["headers"]["owner"]
+    ).json()
+    assert saved == original
+
+
+@pytest.mark.parametrize("method", ["GET", "POST", "DELETE"])
+def test_blocked_former_coowner_cannot_manage_share_links(image_client, method):
+    image = image_client
+    original = share(image).json()
+    assert block(image).status_code == 200
+    # A stale or accidentally restored owner membership must not defeat a block.
+    image["session"].add(
+        ProjectMember(project_id=image["project"].id, user_id=image["editor"].id, role="owner")
+    )
+    image["session"].commit()
+    response = image["client"].request(
+        method,
+        project_url(image) + "/share-link",
+        headers=image["headers"]["editor"],
+        **({"json": {"rotate_token": True}} if method == "POST" else {}),
+    )
+    assert response.status_code == 403
+    assert response.json()["detail"]["code"] == "project_user_blocked"
+    saved = image["client"].get(
+        project_url(image) + "/share-link", headers=image["headers"]["owner"]
+    ).json()
+    assert saved == original
+
+
+def test_coowner_can_manage_links_and_accounts_without_usernames_can_join(image_client):
+    image = image_client
+    member = image["session"].get(ProjectMember, (image["project"].id, image["editor"].id))
+    member.role = "owner"
+    image["session"].add(member)
+    image["session"].commit()
+    assert image["editor"].username is None
+    headers = image["headers"]["editor"]
+    assert image["client"].get(project_url(image) + "/share-link", headers=headers).json() is None
+
+    original = share(image, {"role": "viewer", "expires_at": None}, role="editor").json()
+    assert original["role"] == "viewer" and original["expires_at"] is None
+    joined = accept(image, original["token"])
+    assert joined.status_code == 200 and joined.json()["access_role"] == "viewer"
+    outsider = crud.get_user_by_email(
+        session=image["session"], email="operation-outsider@example.com"
+    )
+    assert outsider.username is None
+    access = image["client"].get(project_url(image) + "/access", headers=headers).json()
+    outsider_access = next(user for user in access if user["id"] == str(outsider.id))
+    assert outsider_access["email"] == outsider.email
+
+    changed = share(image, {"role": "editor"}, role="editor").json()
+    assert changed["token"] == original["token"] and changed["expires_at"] is None
+    assert accept(image, changed["token"]).json()["access_role"] == "viewer"
+    renewed = share(image, {"rotate_token": True}, role="editor").json()
+    assert renewed["token"] != original["token"] and renewed["expires_at"] is None
+    assert accept(image, original["token"]).status_code == 404
+    assert accept(image, renewed["token"]).json()["access_role"] == "viewer"
+
+    disabled = image["client"].delete(project_url(image) + "/share-link", headers=headers)
+    assert disabled.status_code == 204
+    assert image["client"].get(project_url(image) + "/share-link", headers=headers).json() is None
+    assert accept(image, renewed["token"]).status_code == 404
+    assert image["client"].get(
+        project_url(image) + "/tree", headers=image["headers"]["outsider"]
+    ).status_code == 200
+    disabled_again = image["client"].delete(project_url(image) + "/share-link", headers=headers)
+    assert disabled_again.status_code == 204
+
+
+@pytest.mark.parametrize("link_role", ["viewer", "editor"])
+@pytest.mark.parametrize("member_role", ["viewer", "editor", "owner"])
+def test_reaccepting_link_preserves_existing_access_role(image_client, link_role, member_role):
+    image = image_client
+    member = image["session"].get(ProjectMember, (image["project"].id, image["editor"].id))
+    member.role = member_role
+    image["session"].add(member)
+    image["session"].commit()
+    link = share(image, {"role": link_role}).json()
+    before_events = len(image["session"].exec(select(RealtimeEventLog)).all())
+    for _attempt in range(2):
+        response = accept(image, link["token"], role="editor")
+        assert response.status_code == 200
+        assert response.json()["access_role"] == member_role
+    assert member.role == member_role
+    assert len(image["session"].exec(select(RealtimeEventLog)).all()) == before_events
+
+
+@pytest.mark.parametrize("role", ["owner", "admin", ""])
+def test_invalid_link_roles_cannot_escalate_or_modify_existing_link(image_client, role):
+    image = image_client
+    original = share(image, {"role": "viewer", "expires_at": None}).json()
+    response = share(image, {"role": role, "rotate_token": True})
+    assert response.status_code == 400
+    saved = image["client"].get(
+        project_url(image) + "/share-link", headers=image["headers"]["owner"]
+    ).json()
+    assert saved == original
+
+
+@pytest.mark.parametrize("method", ["GET", "POST", "DELETE", "ACCEPT"])
+def test_share_link_requires_authenticated_account_without_leaking_token(image_client, method):
+    image = image_client
+    original = share(image).json()
+    url = project_url(image) + "/share-link"
+    if method == "ACCEPT":
+        url = f"/api/v1/projects/share-links/{original['token']}/accept"
+        method = "POST"
+    response = image["client"].request(method, url)
+    assert response.status_code == 401
+    assert original["token"] not in response.text
+    assert len(image["session"].exec(select(ProjectMember)).all()) == 2
+
+
 def test_legacy_nonexpiring_link_preserved(image_client, monkeypatch):
     image = image_client
     link = ProjectShareLink(project_id=image["project"].id, token="legacy", role="owner")
