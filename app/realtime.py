@@ -2,9 +2,96 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from threading import Lock
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
+
+if TYPE_CHECKING:
+    from sqlmodel import Session
+
+
+def can_deliver_realtime_event(
+    *, session: Session, user_id: UUID, event: str, data: dict[str, Any]
+) -> bool:
+    """Revalidate durable chat events against the person's current membership."""
+    if event not in {"document.chat.created", "document.chat.read"}:
+        return True
+
+    # Local imports avoid the chat service's dependency on the realtime broker.
+    from fastapi import HTTPException
+    from sqlmodel import select
+
+    from app.document_chat import chat_history_visible_from, chat_resource_with_access
+    from app.models import DocumentChatMessage
+
+    try:
+        project_id = UUID(data["project_id"])
+        resource_id = UUID(data["resource_id"])
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return False
+
+    if event == "document.chat.created":
+        message = data.get("message")
+        if not isinstance(message, dict):
+            return False
+        message_id = message.get("id")
+        if not isinstance(message_id, int) or isinstance(message_id, bool) or message_id <= 0:
+            return False
+        try:
+            if (
+                UUID(message["project_id"]) != project_id
+                or UUID(message["resource_id"]) != resource_id
+            ):
+                return False
+        except (KeyError, TypeError, ValueError, AttributeError):
+            return False
+
+    try:
+        chat_resource_with_access(
+            session=session,
+            user_id=user_id,
+            project_id=str(project_id),
+            resource_id=str(resource_id),
+        )
+        visible_from = chat_history_visible_from(
+            session=session,
+            user_id=user_id,
+            project_id=project_id,
+        )
+    except HTTPException:
+        return False
+
+    if event == "document.chat.read":
+        epoch = data.get("history_visible_from")
+        if not isinstance(epoch, str):
+            return False
+        try:
+            event_epoch = datetime.fromisoformat(epoch)
+        except ValueError:
+            return False
+        event_epoch = (
+            event_epoch.replace(tzinfo=UTC)
+            if event_epoch.tzinfo is None
+            else event_epoch.astimezone(UTC)
+        )
+        return event_epoch == visible_from
+
+    # The persisted message is authoritative; a replay's JSON timestamp can be
+    # stale or malformed and must never widen the current membership's history.
+    created_at = session.exec(
+        select(DocumentChatMessage.created_at).where(
+            DocumentChatMessage.id == message_id,
+            DocumentChatMessage.project_id == project_id,
+            DocumentChatMessage.resource_id == resource_id,
+        )
+    ).first()
+    if created_at is None:
+        return False
+    created_at = (
+        created_at.replace(tzinfo=UTC) if created_at.tzinfo is None else created_at.astimezone(UTC)
+    )
+    return created_at >= visible_from
 
 
 @dataclass(frozen=True)
@@ -69,9 +156,7 @@ class RealtimeBroker:
             if not handles:
                 return
 
-            self._subscriptions[user_id] = [
-                current for current in handles if current is not handle
-            ]
+            self._subscriptions[user_id] = [current for current in handles if current is not handle]
             if not self._subscriptions[user_id]:
                 del self._subscriptions[user_id]
 
@@ -101,9 +186,7 @@ class RealtimeBroker:
         payload = RealtimeEvent(event=event, data=data)
         with self._lock:
             handles = [
-                handle
-                for user_id in user_ids
-                for handle in self._subscriptions.get(user_id, [])
+                handle for user_id in user_ids for handle in self._subscriptions.get(user_id, [])
             ]
 
         stale_handles: list[RealtimeSubscriptionHandle] = []

@@ -6,7 +6,17 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from pydantic import ConfigDict, EmailStr, field_serializer, field_validator
-from sqlalchemy import JSON, Column, DateTime, Index, LargeBinary, UniqueConstraint, column, func
+from sqlalchemy import (
+    JSON,
+    CheckConstraint,
+    Column,
+    DateTime,
+    Index,
+    LargeBinary,
+    UniqueConstraint,
+    column,
+    func,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
@@ -289,6 +299,9 @@ class Project(ProjectBase, table=True):
 
     id: UUID = Field(default_factory=uuid4, primary_key=True)
     owner_id: UUID = Field(foreign_key="users.id", index=True)
+    owner_joined_at: datetime | None = Field(
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
+    )
     realtime_generation: UUID = Field(default_factory=uuid4)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
@@ -418,6 +431,7 @@ class DocumentChatMessage(SQLModel, table=True):
             "resource_id", "author_id", "client_message_id", name="uq_document_chat_client_message"
         ),
         Index("ix_document_chat_messages_resource_id_id", "resource_id", "id"),
+        Index("ix_document_chat_messages_resource_created_id", "resource_id", "created_at", "id"),
     )
 
     id: int | None = Field(default=None, primary_key=True)
@@ -430,6 +444,27 @@ class DocumentChatMessage(SQLModel, table=True):
     created_at: datetime = Field(
         # This column is timestamptz: a naive UTC value would be interpreted in
         # the database session's timezone and change between ACK and retry.
+        default_factory=lambda: datetime.now(UTC),
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+
+
+class DocumentChatReadState(SQLModel, table=True):
+    """One monotonic reading position per user/document and membership epoch."""
+
+    __tablename__ = "document_chat_read_states"
+    __table_args__ = (
+        CheckConstraint("last_read_message_id >= 0", name="ck_document_chat_read_nonnegative"),
+    )
+
+    user_id: UUID = Field(foreign_key="users.id", ondelete="CASCADE", primary_key=True)
+    resource_id: UUID = Field(
+        foreign_key="project_resources.id", ondelete="CASCADE", primary_key=True
+    )
+    project_id: UUID = Field(foreign_key="projects.id", ondelete="CASCADE", index=True)
+    joined_at: datetime = Field(sa_column=Column(DateTime(timezone=True), nullable=False))
+    last_read_message_id: int = Field(default=0, ge=0)
+    updated_at: datetime = Field(
         default_factory=lambda: datetime.now(UTC),
         sa_column=Column(DateTime(timezone=True), nullable=False),
     )

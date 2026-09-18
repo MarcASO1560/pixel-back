@@ -7,12 +7,40 @@ from app.document_chat import (
     DocumentChatMessageCreate,
     DocumentChatMessagePublic,
     DocumentChatMessagesPublic,
+    DocumentChatReadUpdate,
+    DocumentChatUnreadPublic,
+    ProjectChatUnreadPublic,
     create_document_chat_message,
     list_document_chat_messages,
+    list_project_chat_unread,
+    mark_document_chat_read,
 )
 
 router = APIRouter()
 CHAT_PATH = "/{project_id}/resources/{resource_id}/chat/messages"
+
+
+@router.get("/{project_id}/chat/unread", response_model=ProjectChatUnreadPublic)
+def read_project_chat_unread(
+    response: Response, session: SessionDep, current_user: CurrentUser, project_id: str,
+) -> ProjectChatUnreadPublic:
+    response.headers["Cache-Control"] = "no-store"
+    return list_project_chat_unread(
+        session=session, user_id=current_user.id, project_id=project_id,
+    )
+
+
+@router.post("/{project_id}/resources/{resource_id}/chat/read",
+             response_model=DocumentChatUnreadPublic)
+def update_document_chat_read(
+    response: Response, session: SessionDep, current_user: CurrentUser,
+    project_id: str, resource_id: str, read_in: DocumentChatReadUpdate,
+) -> DocumentChatUnreadPublic:
+    response.headers["Cache-Control"] = "no-store"
+    return mark_document_chat_read(
+        session=session, user_id=current_user.id, project_id=project_id, resource_id=resource_id,
+        read_in=read_in,
+    )
 
 
 @router.get(CHAT_PATH, response_model=DocumentChatMessagesPublic)

@@ -21,7 +21,7 @@ from app.models import (
     RealtimePresenceConfigPublic,
     RealtimePresenceUserPublic,
 )
-from app.realtime import realtime_broker
+from app.realtime import can_deliver_realtime_event, realtime_broker
 
 router = APIRouter()
 HEARTBEAT_SECONDS = 10
@@ -63,17 +63,38 @@ def list_pending_events(
     user_id: UUID,
     after_event_id: int,
 ) -> list[RealtimeEventLog]:
-    statement = (
-        select(RealtimeEventLog)
-        .where(
-            RealtimeEventLog.user_id == user_id,
-            RealtimeEventLog.id > after_event_id,
-        )
-        .order_by(RealtimeEventLog.id)
-        .limit(MAX_EVENTS_PER_BATCH)
-    )
     try:
-        return list(session.exec(statement).all())
+        visible_events: list[RealtimeEventLog] = []
+        cursor = after_event_id
+        # A removed/rejoined person can have many old outbox rows. Keep scanning
+        # past hidden batches so those rows cannot starve newer visible events.
+        while len(visible_events) < MAX_EVENTS_PER_BATCH:
+            statement = (
+                select(RealtimeEventLog)
+                .where(
+                    RealtimeEventLog.user_id == user_id,
+                    RealtimeEventLog.id > cursor,
+                )
+                .order_by(RealtimeEventLog.id)
+                .limit(MAX_EVENTS_PER_BATCH)
+            )
+            rows = list(session.exec(statement).all())
+            for row in rows:
+                if row.id is None:
+                    continue
+                cursor = row.id
+                if can_deliver_realtime_event(
+                    session=session,
+                    user_id=user_id,
+                    event=row.event,
+                    data=row.data,
+                ):
+                    visible_events.append(row)
+                    if len(visible_events) == MAX_EVENTS_PER_BATCH:
+                        break
+            if len(rows) < MAX_EVENTS_PER_BATCH:
+                break
+        return visible_events
     except SQLAlchemyError:
         session.rollback()
         return []
@@ -155,16 +176,20 @@ async def stream_events(
     session: SessionDep,
     current_user: CookieCurrentUser,
 ) -> StreamingResponse:
+    stream_user_id = current_user.id
     subscription = realtime_broker.subscribe(
-        user_id=current_user.id,
+        user_id=stream_user_id,
         loop=asyncio.get_running_loop(),
     )
     requested_event_id = read_last_event_id(request)
     last_event_id = (
         requested_event_id
         if requested_event_id is not None
-        else latest_event_id(session=session, user_id=current_user.id)
+        else latest_event_id(session=session, user_id=stream_user_id)
     )
+    # Streaming must never keep authentication or replay read transactions open
+    # while waiting for the network. Membership updates need these fences too.
+    session.rollback()
 
     async def event_generator() -> AsyncGenerator[str, None]:
         nonlocal last_event_id
@@ -173,7 +198,7 @@ async def stream_events(
             yield "retry: 3000\n\n"
             yield format_sse_event(
                 event="connected",
-                data={"user_id": str(current_user.id)},
+                data={"user_id": str(stream_user_id)},
             )
 
             stream_deadline = asyncio.get_running_loop().time() + STREAM_MAX_SECONDS
@@ -183,20 +208,21 @@ async def stream_events(
 
                 pending_events = list_pending_events(
                     session=session,
-                    user_id=current_user.id,
+                    user_id=stream_user_id,
                     after_event_id=last_event_id,
                 )
-                if pending_events:
-                    for pending_event in pending_events:
-                        if pending_event.id is None:
-                            continue
-
-                        last_event_id = pending_event.id
-                        yield format_sse_event(
-                            event=pending_event.event,
-                            data=pending_event.data,
-                            event_id=pending_event.id,
-                        )
+                # Serialize before rollback expires ORM rows. Accessing an
+                # expired event afterward would silently reacquire read locks.
+                pending_payloads = [(pending_event.id, format_sse_event(
+                    event=pending_event.event,
+                    data=pending_event.data,
+                    event_id=pending_event.id,
+                )) for pending_event in pending_events if pending_event.id is not None]
+                session.rollback()
+                if pending_payloads:
+                    for event_id, payload in pending_payloads:
+                        last_event_id = event_id
+                        yield payload
                     continue
 
                 timeout_seconds = min(

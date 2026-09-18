@@ -1046,7 +1046,7 @@ def list_project_access(
                 user=owner,
                 role="owner",
                 is_owner=True,
-                joined_at=project.created_at,
+                joined_at=project.owner_joined_at or project.created_at,
             ),
         )
 
@@ -1316,7 +1316,7 @@ def update_project_member_role(
                 user=target_user,
                 role=ProjectAccessRole.owner.value,
                 is_owner=True,
-                joined_at=project.created_at,
+                joined_at=project.owner_joined_at or project.created_at,
             )
 
         owner_members = session.exec(
@@ -1337,12 +1337,15 @@ def update_project_member_role(
                 detail="Another owner is required before changing this owner role",
             )
 
+        previous_owner_joined_at = project.owner_joined_at or project.created_at
         project.owner_id = next_owner.user_id
+        project.owner_joined_at = aware_utc(next_owner.created_at)
         project.updated_at = utc_now()
         replacement_member = ProjectMember(
             project_id=project.id,
             user_id=target_user_id,
             role=next_role,
+            created_at=aware_utc(previous_owner_joined_at).replace(tzinfo=None),
         )
         session.add(project)
         session.delete(next_owner)
@@ -1476,6 +1479,7 @@ def leave_project(
             )
 
         project.owner_id = next_owner.user_id
+        project.owner_joined_at = aware_utc(next_owner.created_at)
         project.updated_at = utc_now()
         session.add(project)
         session.delete(next_owner)

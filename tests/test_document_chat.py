@@ -400,7 +400,11 @@ def test_latest_history_and_forward_catchup_have_stable_ascending_order(image_cl
     assert forward2["messages"] == messages[3:6]
     assert forward2["has_more"] is True
     last = read(image, after_id=messages[-1]["id"]).json()
-    assert last == {"messages": [], "has_more": False, "next_before_id": None}
+    assert last["messages"] == []
+    assert last["has_more"] is False
+    assert last["next_before_id"] is None
+    assert last["last_message_id"] == messages[-1]["id"]
+    assert last["last_read_message_id"] == last["unread_count"] == 0
 
 
 @pytest.mark.parametrize(

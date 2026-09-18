@@ -80,12 +80,16 @@ def local_postgres_image(monkeypatch):
             )
             session.add(resource)
             session.commit()
-            yield {
+            fixture_data = {
                 "engine": engine,
                 "user_id": owner.id,
                 "project_id": str(project.id),
                 "resource_id": str(resource.id),
             }
+            # Reading expired IDs after commit opens a new transaction. Release
+            # its relation locks before tests run schema migrations or races.
+            session.rollback()
+            yield fixture_data
     finally:
         if engine is not None:
             engine.dispose()

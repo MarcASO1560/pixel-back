@@ -6,16 +6,27 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from pydantic import ConfigDict, field_validator, model_validator
-from sqlalchemy import text
+from pydantic import ConfigDict, StrictInt, field_validator, model_validator
+from sqlalchemy import and_, case, func, text
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlmodel import Field, Session, SQLModel, select
 
 from app.crud import get_project_with_access_or_404, list_project_user_ids
-from app.models import DocumentChatMessage, ProjectResource, RealtimeEventLog, User
+from app.models import (
+    DocumentChatMessage,
+    DocumentChatReadState,
+    Project,
+    ProjectMember,
+    ProjectResource,
+    RealtimeEventLog,
+    User,
+)
 from app.realtime import realtime_broker
 
 CHAT_MESSAGE_EVENT = "document.chat.created"
+CHAT_READ_EVENT = "document.chat.read"
 # Stable identifiers only: the client resolves these to the bundled Tiny RPG art.
 # Never accept attachment URLs or paths from chat messages.
 TINY_RPG_STICKER_IDS = frozenset({
@@ -115,6 +126,160 @@ class DocumentChatMessagesPublic(SQLModel):
     messages: list[DocumentChatMessagePublic]
     has_more: bool
     next_before_id: int | None
+    unread_count: int = 0
+    last_read_message_id: int = 0
+    last_message_id: int | None = None
+    history_visible_from: datetime
+
+
+class DocumentChatReadUpdate(SQLModel):
+    model_config = ConfigDict(extra="forbid")
+
+    last_read_message_id: StrictInt = Field(ge=0)
+
+
+class DocumentChatUnreadPublic(SQLModel):
+    resource_id: UUID
+    unread_count: int
+    last_message_id: int | None
+    last_read_message_id: int
+
+
+class ProjectChatUnreadPublic(SQLModel):
+    documents: list[DocumentChatUnreadPublic]
+
+
+def aware_utc(value: datetime) -> datetime:
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+def chat_history_visible_from(*, session: Session, user_id: UUID, project_id: UUID) -> datetime:
+    """Call under the project access fence; membership dates survive owner transfers."""
+    joined_at = session.exec(
+        select(ProjectMember.created_at).where(
+            ProjectMember.project_id == project_id, ProjectMember.user_id == user_id
+        )
+    ).first()
+    if joined_at is not None:
+        return aware_utc(joined_at)
+    owner_dates = session.exec(
+        select(Project.created_at, Project.owner_joined_at)
+        .where(Project.id == project_id, Project.owner_id == user_id)
+    ).first()
+    if owner_dates is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    created_at, owner_joined_at = owner_dates
+    return aware_utc(owner_joined_at or created_at)
+
+
+def _unread_documents(
+    *, session: Session, user_id: UUID, project_id: UUID, joined_at: datetime,
+    resource_id: UUID | None = None,
+) -> list[DocumentChatUnreadPublic]:
+    # Select identities and aggregate columns only. This query never loads a canvas
+    # or issues a query per document. A stale membership epoch cannot suppress unread.
+    cursor = func.coalesce(DocumentChatReadState.last_read_message_id, 0)
+    statement = (
+        select(
+            ProjectResource.id,
+            cursor.label("last_read_message_id"),
+            func.max(DocumentChatMessage.id).label("last_message_id"),
+            func.coalesce(func.sum(case((and_(
+                DocumentChatMessage.id > cursor,
+                DocumentChatMessage.author_id != user_id,
+            ), 1), else_=0)), 0).label("unread_count"),
+        )
+        .outerjoin(DocumentChatReadState, and_(
+            DocumentChatReadState.resource_id == ProjectResource.id,
+            DocumentChatReadState.user_id == user_id,
+            DocumentChatReadState.joined_at == joined_at,
+        ))
+        .outerjoin(DocumentChatMessage, and_(
+            DocumentChatMessage.resource_id == ProjectResource.id,
+            DocumentChatMessage.created_at >= joined_at,
+        ))
+        .where(ProjectResource.project_id == project_id)
+        .group_by(ProjectResource.id, DocumentChatReadState.last_read_message_id)
+        .order_by(ProjectResource.id)
+    )
+    if resource_id is not None:
+        statement = statement.where(ProjectResource.id == resource_id)
+    return [DocumentChatUnreadPublic(
+        resource_id=resource, last_read_message_id=int(read_id),
+        last_message_id=last_id, unread_count=int(unread),
+    ) for resource, read_id, last_id, unread in session.exec(statement).all()]
+
+
+def list_project_chat_unread(
+    *, session: Session, user_id: UUID, project_id: str,
+) -> ProjectChatUnreadPublic:
+    project, _role = get_project_with_access_or_404(
+        session=session, user_id=user_id, project_id=project_id
+    )
+    joined_at = chat_history_visible_from(session=session, user_id=user_id, project_id=project.id)
+    return ProjectChatUnreadPublic(documents=_unread_documents(
+        session=session, user_id=user_id, project_id=project.id, joined_at=joined_at,
+    ))
+
+
+def mark_document_chat_read(
+    *, session: Session, user_id: UUID, project_id: str, resource_id: str,
+    read_in: DocumentChatReadUpdate,
+) -> DocumentChatUnreadPublic:
+    project, resource = chat_resource_with_access(
+        session=session, user_id=user_id, project_id=project_id, resource_id=resource_id,
+    )
+    joined_at = chat_history_visible_from(session=session, user_id=user_id, project_id=project)
+    requested = read_in.last_read_message_id
+    if requested and session.exec(select(DocumentChatMessage.id).where(
+        DocumentChatMessage.id == requested,
+        DocumentChatMessage.project_id == project,
+        DocumentChatMessage.resource_id == resource,
+        DocumentChatMessage.created_at >= joined_at,
+    )).first() is None:
+        raise HTTPException(status_code=422, detail="Reading position must be a visible message")
+    # A native upsert serializes concurrent devices on this row, including the
+    # first insert, without a read/modify/write race or resetting a newer cursor.
+    insert = postgresql_insert if session.get_bind().dialect.name == "postgresql" else sqlite_insert
+    statement = insert(DocumentChatReadState).values(
+        user_id=user_id, project_id=project, resource_id=resource, joined_at=joined_at,
+        last_read_message_id=requested, updated_at=datetime.now(UTC),
+    )
+    same_epoch = DocumentChatReadState.joined_at == statement.excluded.joined_at
+    advanced = case(
+        (DocumentChatReadState.last_read_message_id > statement.excluded.last_read_message_id,
+         DocumentChatReadState.last_read_message_id),
+        else_=statement.excluded.last_read_message_id,
+    )
+    statement = statement.on_conflict_do_update(
+        index_elements=[DocumentChatReadState.user_id, DocumentChatReadState.resource_id],
+        set_={
+            "joined_at": statement.excluded.joined_at,
+            "last_read_message_id": case((same_epoch, advanced),
+                                         else_=statement.excluded.last_read_message_id),
+            "updated_at": statement.excluded.updated_at,
+        },
+    )
+    try:
+        session.execute(statement)
+        result = _unread_documents(
+            session=session, user_id=user_id, project_id=project, joined_at=joined_at,
+            resource_id=resource,
+        )[0]
+        data = {
+            "project_id": str(project), **result.model_dump(mode="json"),
+            "history_visible_from": joined_at.isoformat(),
+        }
+        session.add(RealtimeEventLog(user_id=user_id, event=CHAT_READ_EVENT, data=data))
+        session.commit()
+    except SQLAlchemyError:
+        session.rollback()
+        raise
+    try:
+        realtime_broker.publish(user_ids={user_id}, event=CHAT_READ_EVENT, data=data)
+    except Exception:
+        logger.warning("Realtime delivery failed for committed chat read state", exc_info=True)
+    return result
 
 
 def message_to_public(
@@ -188,13 +353,17 @@ def list_document_chat_messages(
 ) -> DocumentChatMessagesPublic:
     if before_id is not None and after_id is not None:
         raise HTTPException(status_code=422, detail="Use before_id or after_id, not both")
-    _project, resource = chat_resource_with_access(
+    project, resource = chat_resource_with_access(
         session=session, user_id=user_id, project_id=project_id, resource_id=resource_id
     )
+    joined_at = chat_history_visible_from(session=session, user_id=user_id, project_id=project)
     statement = (
         select(DocumentChatMessage, User)
         .join(User, User.id == DocumentChatMessage.author_id)
-        .where(DocumentChatMessage.resource_id == resource)
+        .where(
+            DocumentChatMessage.resource_id == resource,
+            DocumentChatMessage.created_at >= joined_at,
+        )
     )
     if before_id is not None:
         statement = statement.where(DocumentChatMessage.id < before_id)
@@ -210,10 +379,18 @@ def list_document_chat_messages(
     if after_id is None:
         rows.reverse()
     messages = [message_to_public(message=message, author=author) for message, author in rows]
+    unread = _unread_documents(
+        session=session, user_id=user_id, project_id=project, joined_at=joined_at,
+        resource_id=resource,
+    )[0]
     return DocumentChatMessagesPublic(
         messages=messages,
         has_more=has_more,
         next_before_id=messages[0].id if messages else None,
+        unread_count=unread.unread_count,
+        last_read_message_id=unread.last_read_message_id,
+        last_message_id=unread.last_message_id,
+        history_visible_from=joined_at,
     )
 
 
@@ -232,6 +409,7 @@ def create_document_chat_message(
         resource_id=resource_id,
         writing=True,
     )
+    joined_at = chat_history_visible_from(session=session, user_id=author.id, project_id=project)
     receipt_statement = select(DocumentChatMessage).where(
         DocumentChatMessage.resource_id == resource,
         DocumentChatMessage.author_id == author.id,
@@ -239,6 +417,14 @@ def create_document_chat_message(
     )
 
     def duplicate_response(message: DocumentChatMessage) -> DocumentChatMessagePublic:
+        if aware_utc(message.created_at) < joined_at:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "chat_message_before_membership",
+                    "message": "This message identifier belongs to a previous project membership",
+                },
+            )
         if message.body != message_in.body or message.sticker_id != message_in.sticker_id:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -289,6 +475,9 @@ def create_document_chat_message(
             project_id=project_id,
             resource_id=resource_id,
             writing=True,
+        )
+        joined_at = chat_history_visible_from(
+            session=session, user_id=author.id, project_id=project,
         )
         existing = session.exec(receipt_statement).first()
         if existing is None:

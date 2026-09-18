@@ -17,8 +17,20 @@ from test_project_sharing_postgresql import sharing_database as sharing_database
 
 from app import document_chat
 from app.crud import block_project_user
-from app.document_chat import DocumentChatMessageCreate, create_document_chat_message
-from app.models import DocumentChatMessage, Project, ProjectResource, RealtimeEventLog, User
+from app.document_chat import (
+    DocumentChatMessageCreate,
+    DocumentChatReadUpdate,
+    create_document_chat_message,
+    mark_document_chat_read,
+)
+from app.models import (
+    DocumentChatMessage,
+    DocumentChatReadState,
+    Project,
+    ProjectResource,
+    RealtimeEventLog,
+    User,
+)
 
 
 @pytest.fixture
@@ -39,6 +51,79 @@ def append(image, *, session, client_id=None, body="hello", author_id=None, stic
             client_message_id=client_id or uuid4(), body=body, sticker_id=sticker_id
         ),
     )
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_concurrent_device_read_positions_do_not_overwrite_newer_cursor(chat_database, existing):
+    image = chat_database
+    with Session(image["engine"]) as session:
+        oldest = append(image, session=session, body="oldest")
+        newest = append(image, session=session, body="newest")
+        if existing:
+            mark_document_chat_read(
+                session=session, user_id=image["user_id"], project_id=image["project_id"],
+                resource_id=image["resource_id"],
+                read_in=DocumentChatReadUpdate(last_read_message_id=oldest.id),
+            )
+    barrier = Barrier(2)
+
+    def read_from_device(message_id):
+        with Session(image["engine"]) as session:
+            session.exec(text("SET TIME ZONE 'Europe/Madrid'"))
+            barrier.wait(timeout=10)
+            return mark_document_chat_read(
+                session=session, user_id=image["user_id"], project_id=image["project_id"],
+                resource_id=image["resource_id"],
+                read_in=DocumentChatReadUpdate(last_read_message_id=message_id),
+            )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(read_from_device, message_id)
+                   for message_id in (newest.id, oldest.id)]
+        results = [future.result(timeout=20) for future in futures]
+    assert all(result.last_read_message_id >= oldest.id for result in results)
+    with Session(image["engine"]) as session:
+        state = session.exec(select(DocumentChatReadState)).one()
+        assert state.last_read_message_id == newest.id
+        page = document_chat.list_document_chat_messages(
+            session=session, user_id=image["user_id"], project_id=image["project_id"],
+            resource_id=image["resource_id"],
+        )
+        assert page.last_read_message_id == newest.id
+        assert page.unread_count == 0
+
+
+def test_read_migration_enables_rls_and_keeps_existing_messages(chat_database):
+    from importlib.util import module_from_spec, spec_from_file_location
+    from pathlib import Path
+
+    from alembic.migration import MigrationContext
+    from alembic.operations import Operations
+
+    image = chat_database
+    with Session(image["engine"]) as session:
+        message = append(image, session=session)
+    spec = spec_from_file_location(
+        "chat_read_state_migration",
+        Path(__file__).resolve().parents[1]
+        / "alembic/versions/20260918_0025_document_chat_read_states.py",
+    )
+    assert spec is not None and spec.loader is not None
+    revision = module_from_spec(spec)
+    spec.loader.exec_module(revision)
+    with image["engine"].begin() as connection:
+        connection.execute(text("DROP TABLE document_chat_read_states"))
+        connection.execute(text("ALTER TABLE projects DROP COLUMN owner_joined_at"))
+        connection.execute(text("DROP INDEX ix_document_chat_messages_resource_created_id"))
+        with Operations.context(MigrationContext.configure(connection)):
+            revision.upgrade()
+        assert connection.execute(text(
+            "SELECT relrowsecurity FROM pg_class "
+            "WHERE oid = 'public.document_chat_read_states'::regclass"
+        )).scalar_one() is True
+        assert connection.execute(text(
+            "SELECT body FROM document_chat_messages WHERE id = :id"
+        ), {"id": message.id}).scalar_one() == "hello"
 
 
 @pytest.mark.parametrize("sticker_id", [None, "tiny-rpg-love"])
