@@ -49,8 +49,18 @@ INTEROP_PACKED = {
 
 def test_python_fixture_is_lossless_and_keeps_small_arrays_compatible():
     assert encode_pixels(INTEROP_PIXELS) is INTEROP_PIXELS
-    assert encode_pixels(INTEROP_PIXELS, force=True) == INTEROP_PACKED
+    encoded = encode_pixels(INTEROP_PIXELS, force=True)
+    assert isinstance(encoded, dict)
+    assert set(encoded) == set(INTEROP_PACKED)
+    for key in ("encoding", "colors", "index_bytes"):
+        assert encoded[key] == INTEROP_PACKED[key]
+    # Valid deflate encoders can produce different bytes across zlib versions
+    # and platforms; interoperability requires identical inflated indices.
+    assert zlib.decompress(base64.b64decode(encoded["data"])) == zlib.decompress(
+        base64.b64decode(INTEROP_PACKED["data"])
+    )
     assert decode_pixels(INTEROP_PACKED, 16) == INTEROP_PIXELS
+    assert decode_pixels(encoded, 16) == INTEROP_PIXELS
 
 
 @pytest.mark.parametrize("count,index_bytes", [(4, 1), (256, 2), (65536, 4)])
