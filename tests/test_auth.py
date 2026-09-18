@@ -201,6 +201,107 @@ def test_register_with_password_creates_session() -> None:
         assert me_response.json()["email"] == "user@example.com"
 
 
+@pytest.mark.parametrize("username", ["Dr.Maraka.exe", "Pixel-Artist"])
+def test_register_and_update_accept_usernames_with_dots_and_hyphens(username: str) -> None:
+    with create_auth_client() as (client, _session):
+        response = client.post(
+            "/api/v1/auth/register",
+            json={
+                "username": username,
+                "email": "username@example.com",
+                "password": "secret-pass",
+                "password_confirmation": "secret-pass",
+            },
+        )
+
+        assert response.status_code == 200
+        headers = {"Authorization": f"Bearer {response.json()['access_token']}"}
+        assert client.get("/api/v1/users/me", headers=headers).json()["username"] == (
+            username.lower()
+        )
+
+        update_response = client.patch(
+            "/api/v1/users/me",
+            headers=headers,
+            json={"username": f"New.{username}-01"},
+        )
+
+        assert update_response.status_code == 200
+        assert update_response.json()["username"] == f"new.{username.lower()}-01"
+        assert client.get("/api/v1/users/me", headers=headers).json()["username"] == (
+            f"new.{username.lower()}-01"
+        )
+
+
+@pytest.mark.parametrize("username", ["Pixel Artist", "Artist@Name", "_.-"])
+def test_register_and_update_explain_invalid_username_characters(username: str) -> None:
+    with create_auth_client() as (client, _session):
+        registration = {
+            "username": username,
+            "email": "invalid-username@example.com",
+            "password": "secret-pass",
+            "password_confirmation": "secret-pass",
+        }
+        register_response = client.post("/api/v1/auth/register", json=registration)
+
+        registration["username"] = "original_name"
+        access_token = client.post("/api/v1/auth/register", json=registration).json()[
+            "access_token"
+        ]
+        headers = {"Authorization": f"Bearer {access_token}"}
+        update_response = client.patch(
+            "/api/v1/users/me",
+            headers=headers,
+            json={"username": username},
+        )
+
+        for response in (register_response, update_response):
+            assert response.status_code == 422
+            error = response.json()["detail"][0]
+            assert error["loc"] == ["body", "username"]
+            assert error["msg"] == (
+                "Value error, Username can only contain letters, numbers, dots, "
+                "hyphens, and underscores"
+            )
+
+        assert client.get("/api/v1/users/me", headers=headers).json()["username"] == (
+            "original_name"
+        )
+
+
+def test_register_and_update_reject_case_normalized_username_collisions() -> None:
+    with create_auth_client() as (client, _session):
+        registration = {
+            "username": "Dr.Maraka-exe",
+            "email": "first-name@example.com",
+            "password": "secret-pass",
+            "password_confirmation": "secret-pass",
+        }
+        assert client.post("/api/v1/auth/register", json=registration).status_code == 200
+
+        registration.update(username="DR.MARAKA-EXE", email="second-name@example.com")
+        collision_response = client.post("/api/v1/auth/register", json=registration)
+
+        registration["username"] = "other_name"
+        access_token = client.post("/api/v1/auth/register", json=registration).json()[
+            "access_token"
+        ]
+        headers = {"Authorization": f"Bearer {access_token}"}
+        update_response = client.patch(
+            "/api/v1/users/me",
+            headers=headers,
+            json={"username": "DR.MARAKA-EXE"},
+        )
+
+        for response in (collision_response, update_response):
+            assert response.status_code == 400
+            assert response.json() == {"detail": "A user with this username already exists"}
+
+        assert client.get("/api/v1/users/me", headers=headers).json()["username"] == (
+            "other_name"
+        )
+
+
 def test_current_user_can_update_profile_and_pixel_avatar() -> None:
     with create_auth_client() as (client, _session):
         register_response = client.post(

@@ -134,8 +134,10 @@ class UserUpdate(SQLModel):
     def validate_username(cls, username: str | None) -> str | None:
         if username is None:
             return username
-        if not username.replace("_", "").isalnum():
-            raise ValueError("Username can only contain letters, numbers, and underscores")
+        if not username.translate(str.maketrans("", "", "_.-")).isalnum():
+            raise ValueError(
+                "Username can only contain letters, numbers, dots, hyphens, and underscores",
+            )
         return username
 
     @field_validator("pixel_art_palette")
@@ -172,8 +174,10 @@ class UserRegistrationCreate(SQLModel):
     @field_validator("username")
     @classmethod
     def validate_username(cls, username: str) -> str:
-        if not username.replace("_", "").isalnum():
-            raise ValueError("Username can only contain letters, numbers, and underscores")
+        if not username.translate(str.maketrans("", "", "_.-")).isalnum():
+            raise ValueError(
+                "Username can only contain letters, numbers, dots, hyphens, and underscores",
+            )
         return username
 
 
