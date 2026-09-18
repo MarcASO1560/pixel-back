@@ -6,7 +6,7 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from pydantic import ConfigDict, field_validator
+from pydantic import ConfigDict, field_validator, model_validator
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlmodel import Field, Session, SQLModel, select
@@ -16,6 +16,42 @@ from app.models import DocumentChatMessage, ProjectResource, RealtimeEventLog, U
 from app.realtime import realtime_broker
 
 CHAT_MESSAGE_EVENT = "document.chat.created"
+# Stable identifiers only: the client resolves these to the bundled Tiny RPG art.
+# Never accept attachment URLs or paths from chat messages.
+TINY_RPG_STICKER_IDS = frozenset({
+    "tiny-rpg-neutral",
+    "tiny-rpg-angry",
+    "tiny-rpg-sad",
+    "tiny-rpg-laughing",
+    "tiny-rpg-eager",
+    "tiny-rpg-shocked",
+    "tiny-rpg-speechless",
+    "tiny-rpg-sleepy",
+    "tiny-rpg-quiet",
+    "tiny-rpg-dizzy",
+    "tiny-rpg-love",
+    "tiny-rpg-surprised",
+    "tiny-rpg-confused",
+    "tiny-rpg-thinking",
+    "tiny-rpg-idea",
+    "tiny-rpg-lit",
+    "tiny-rpg-inviting",
+    "tiny-rpg-pointing-up",
+    "tiny-rpg-pointing-down",
+    "tiny-rpg-pointing-left",
+    "tiny-rpg-pointing-right",
+    "tiny-rpg-drooling",
+    "tiny-rpg-kissing",
+    "tiny-rpg-no",
+    "tiny-rpg-yes",
+    "tiny-rpg-tongue-out",
+    "tiny-rpg-prohibited",
+    "tiny-rpg-headblown",
+    "tiny-rpg-adorable",
+    "tiny-rpg-thumbs-up",
+    "tiny-rpg-sweating",
+    "tiny-rpg-frustrated",
+})
 logger = logging.getLogger(__name__)
 
 
@@ -23,7 +59,8 @@ class DocumentChatMessageCreate(SQLModel):
     model_config = ConfigDict(extra="forbid")
 
     client_message_id: UUID
-    body: str = Field(min_length=1, max_length=2000)
+    body: str = Field(default="", max_length=2000)
+    sticker_id: str | None = Field(default=None, max_length=80)
 
     @field_validator("body", mode="before")
     @classmethod
@@ -31,6 +68,23 @@ class DocumentChatMessageCreate(SQLModel):
         if not isinstance(value, str):
             raise ValueError("Message body must be text")
         return value.strip()
+
+    @field_validator("sticker_id", mode="before")
+    @classmethod
+    def validate_sticker_id(cls, value: object) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str) or value not in TINY_RPG_STICKER_IDS:
+            raise ValueError("Choose a sticker from the Tiny RPG pack")
+        return value
+
+    @model_validator(mode="after")
+    def validate_content(self) -> "DocumentChatMessageCreate":
+        if self.body and self.sticker_id is not None:
+            raise ValueError("Send either message text or a sticker, not both")
+        if not self.body and self.sticker_id is None:
+            raise ValueError("A message requires text or a sticker")
+        return self
 
 
 class DocumentChatAuthorPublic(SQLModel):
@@ -47,6 +101,7 @@ class DocumentChatMessagePublic(SQLModel):
     resource_id: UUID
     author: DocumentChatAuthorPublic
     body: str
+    sticker_id: str | None = None
     created_at: datetime
 
     @field_validator("created_at")
@@ -77,6 +132,7 @@ def message_to_public(
             avatar_pixel_art=author.avatar_pixel_art,
         ),
         body=message.body,
+        sticker_id=message.sticker_id,
         created_at=message.created_at,
     )
 
@@ -177,12 +233,12 @@ def create_document_chat_message(
     )
 
     def duplicate_response(message: DocumentChatMessage) -> DocumentChatMessagePublic:
-        if message.body != message_in.body:
+        if message.body != message_in.body or message.sticker_id != message_in.sticker_id:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail={
                     "code": "chat_message_id_reused",
-                    "message": "This message identifier was already used for different text",
+                    "message": "This message identifier was already used for different content",
                 },
             )
         result = message_to_public(message=message, author=author)
@@ -198,6 +254,7 @@ def create_document_chat_message(
         author_id=author.id,
         client_message_id=message_in.client_message_id,
         body=message_in.body,
+        sticker_id=message_in.sticker_id,
     )
     try:
         session.add(message)

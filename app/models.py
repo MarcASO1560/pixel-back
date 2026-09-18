@@ -419,9 +419,12 @@ class DocumentChatMessage(SQLModel, table=True):
     resource_id: UUID = Field(foreign_key="project_resources.id", ondelete="CASCADE", index=True)
     author_id: UUID = Field(foreign_key="users.id", ondelete="CASCADE", index=True)
     client_message_id: UUID
-    body: str = Field(min_length=1, max_length=2000)
+    body: str = Field(default="", max_length=2000)
+    sticker_id: str | None = Field(default=None, max_length=80)
     created_at: datetime = Field(
-        default_factory=utc_now,
+        # This column is timestamptz: a naive UTC value would be interpreted in
+        # the database session's timezone and change between ACK and retry.
+        default_factory=lambda: datetime.now(UTC),
         sa_column=Column(DateTime(timezone=True), nullable=False),
     )
 

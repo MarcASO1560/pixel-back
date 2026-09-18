@@ -25,10 +25,13 @@ def chat_url(image):
     return image["url"] + "/chat/messages"
 
 
-def send(image, body="Hola", role="owner", client_message_id=None, url=None):
+def send(image, body="Hola", role="owner", client_message_id=None, url=None, sticker_id=None):
+    payload = {"client_message_id": str(client_message_id or uuid4()), "body": body}
+    if sticker_id is not None:
+        payload["sticker_id"] = sticker_id
     return image["client"].post(
         url or chat_url(image),
-        json={"client_message_id": str(client_message_id or uuid4()), "body": body},
+        json=payload,
         headers=image["headers"][role],
     )
 
@@ -49,6 +52,7 @@ def test_members_including_viewers_can_converse_without_changing_the_drawing(ima
         assert response.headers["cache-control"] == "no-store"
         message = response.json()
         assert message["body"] == f"Desde {role}"
+        assert message["sticker_id"] is None
         assert message["created_at"].endswith("Z")
         assert message["project_id"] == str(image["project"].id)
         assert message["resource_id"] == str(image["resource"].id)
@@ -78,9 +82,12 @@ def test_author_avatar_and_username_are_public_but_email_is_not(image_client):
     }
 
 
-def test_outsiders_and_unauthenticated_requests_cannot_read_or_append(image_client):
+@pytest.mark.parametrize("sticker_id", [None, "tiny-rpg-love"])
+def test_outsiders_and_unauthenticated_requests_cannot_read_or_append(image_client, sticker_id):
     image = image_client
-    assert send(image, role="outsider").status_code == 404
+    assert send(
+        image, body="" if sticker_id else "Hola", role="outsider", sticker_id=sticker_id
+    ).status_code == 404
     assert read(image, "outsider").status_code == 404
     assert image["client"].get(chat_url(image)).status_code in (401, 403)
     assert image["client"].post(chat_url(image), json={}).status_code in (401, 403)
@@ -103,10 +110,14 @@ def test_cross_project_and_missing_resources_are_rejected(image_client):
 
 
 @pytest.mark.parametrize("change", ["block", "remove"])
-def test_revoked_members_cannot_read_retry_or_append(image_client, change):
+@pytest.mark.parametrize("sticker_id", [None, "tiny-rpg-love"])
+def test_revoked_members_cannot_read_retry_or_append(image_client, change, sticker_id):
     image = image_client
     client_id = uuid4()
-    assert send(image, role="editor", client_message_id=client_id).status_code == 200
+    body = "" if sticker_id else "Hola"
+    assert send(
+        image, body, role="editor", client_message_id=client_id, sticker_id=sticker_id
+    ).status_code == 200
     project_url = f"/api/v1/projects/{image['project'].id}"
     if change == "block":
         response = image["client"].post(
@@ -122,8 +133,10 @@ def test_revoked_members_cannot_read_retry_or_append(image_client, change):
         denied_status = 404
     assert response.status_code in (200, 204)
     assert read(image, "editor").status_code == denied_status
-    assert send(image, role="editor").status_code == denied_status
-    assert send(image, role="editor", client_message_id=client_id).status_code == denied_status
+    assert send(image, body, role="editor", sticker_id=sticker_id).status_code == denied_status
+    assert send(
+        image, body, role="editor", client_message_id=client_id, sticker_id=sticker_id
+    ).status_code == denied_status
 
 
 @pytest.mark.parametrize("body", ["", "  \n\t  ", "a" * 2001, None, 7, {}])
@@ -141,6 +154,103 @@ def test_body_limit_multiline_unicode_and_plaintext(image_client):
         headers=image_client["headers"]["owner"],
     )
     assert malformed.status_code == 422
+
+
+def test_every_bundled_sticker_persists_with_optional_empty_body_and_public_history(image_client):
+    image = image_client
+    before = deepcopy(image["resource"].data)
+    revision = image["resource"].revision
+    messages = []
+    assert len(document_chat.TINY_RPG_STICKER_IDS) == 32
+    for sticker_id in sorted(document_chat.TINY_RPG_STICKER_IDS):
+        response = image["client"].post(
+            chat_url(image),
+            json={"client_message_id": str(uuid4()), "sticker_id": sticker_id},
+            headers=image["headers"]["viewer"],
+        )
+        assert response.status_code == 200
+        message = response.json()
+        assert message["body"] == ""
+        assert message["sticker_id"] == sticker_id
+        assert "email" not in message["author"]
+        messages.append(message)
+    assert read(image, "editor").json()["messages"] == messages
+    rows = image["session"].exec(select(DocumentChatMessage).order_by(DocumentChatMessage.id)).all()
+    assert [(row.body, row.sticker_id) for row in rows] == [
+        ("", message["sticker_id"]) for message in messages
+    ]
+    image["session"].refresh(image["resource"])
+    assert image["resource"].data == before
+    assert image["resource"].revision == revision
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        {},
+        {"sticker_id": None},
+        {"sticker_id": ""},
+        {"sticker_id": "tiny-rpg-unknown"},
+        {"sticker_id": "https://example.com/image.gif"},
+        {"sticker_id": "../../tiny-rpg-love"},
+        {"sticker_id": "Tiny-rpg-love"},
+        {"sticker_id": 7},
+        {"sticker_id": {}},
+        {"body": "text", "sticker_id": "tiny-rpg-love"},
+        {"body": None, "sticker_id": "tiny-rpg-love"},
+        {"body": "a" * 2001, "sticker_id": "tiny-rpg-love"},
+        {"body": "text", "sticker_url": "https://example.com/image.gif"},
+    ],
+)
+def test_sticker_validation_requires_one_content_type_and_rejects_unbundled_assets(
+    image_client, content
+):
+    image = image_client
+    response = image["client"].post(
+        chat_url(image),
+        json={"client_message_id": str(uuid4()), **content},
+        headers=image["headers"]["owner"],
+    )
+    assert response.status_code == 422
+    assert image["session"].exec(select(DocumentChatMessage)).all() == []
+    assert image["session"].exec(select(RealtimeEventLog)).all() == []
+
+
+def test_sticker_retries_acknowledge_once_and_content_changes_conflict(image_client, monkeypatch):
+    image = image_client
+    publish = Mock()
+    monkeypatch.setattr(document_chat.realtime_broker, "publish", publish)
+    client_id = uuid4()
+    first = send(image, "", client_message_id=client_id, sticker_id="tiny-rpg-love")
+    assert first.status_code == 200
+    retry = send(image, " \n ", client_message_id=client_id, sticker_id="tiny-rpg-love")
+    assert retry.json() == first.json()
+    changed = send(image, "", client_message_id=client_id, sticker_id="tiny-rpg-yes")
+    assert changed.status_code == 409
+    assert changed.json()["detail"]["code"] == "chat_message_id_reused"
+    assert send(image, "text instead", client_message_id=client_id).status_code == 409
+    text_id = uuid4()
+    assert send(image, "original text", client_message_id=text_id).status_code == 200
+    assert send(
+        image, "", client_message_id=text_id, sticker_id="tiny-rpg-love"
+    ).status_code == 409
+    assert len(read(image).json()["messages"]) == 2
+    assert len(image["session"].exec(select(RealtimeEventLog)).all()) == 6
+    assert publish.call_count == 2
+
+
+def test_sticker_history_uses_the_same_pagination_as_text(image_client):
+    image = image_client
+    messages = [
+        send(image, "text before").json(),
+        send(image, "", sticker_id="tiny-rpg-love").json(),
+        send(image, "text after").json(),
+    ]
+    latest = read(image, limit=2).json()
+    assert latest["messages"] == messages[1:]
+    assert latest["has_more"] is True
+    assert read(image, before_id=latest["next_before_id"]).json()["messages"] == messages[:1]
+    assert read(image, after_id=messages[0]["id"]).json()["messages"] == messages[1:]
 
 
 def test_retries_acknowledge_once_and_reused_id_with_changed_text_is_a_conflict(image_client):
@@ -172,13 +282,15 @@ def test_retries_acknowledge_once_and_reused_id_with_changed_text_is_a_conflict(
     assert len(read(image).json()["messages"]) == 2
 
 
+@pytest.mark.parametrize("sticker_id", [None, "tiny-rpg-love"])
 def test_transactional_event_is_sent_to_all_current_members_including_author(
-    image_client, monkeypatch
+    image_client, monkeypatch, sticker_id
 ):
     image = image_client
     publish = Mock()
     monkeypatch.setattr(document_chat.realtime_broker, "publish", publish)
-    response = send(image)
+    body = "" if sticker_id else "Hola"
+    response = send(image, body, sticker_id=sticker_id)
     message = response.json()
     assert response.status_code == 200
     events = image["session"].exec(select(RealtimeEventLog)).all()
@@ -201,7 +313,7 @@ def test_transactional_event_is_sent_to_all_current_members_including_author(
     publish.assert_called_once_with(
         user_ids=recipients, event=document_chat.CHAT_MESSAGE_EVENT, data=data
     )
-    send(image, client_message_id=message["client_message_id"])
+    send(image, body, client_message_id=message["client_message_id"], sticker_id=sticker_id)
     assert publish.call_count == 1
 
 

@@ -10,6 +10,7 @@ from uuid import uuid4
 
 import pytest
 from fastapi import HTTPException
+from sqlalchemy import text
 from sqlmodel import Session, select
 from test_image_operations_postgresql import local_postgres_image as local_postgres_image
 from test_project_sharing_postgresql import sharing_database as sharing_database
@@ -26,7 +27,7 @@ def chat_database(local_postgres_image, monkeypatch):
     return local_postgres_image
 
 
-def append(image, *, session, client_id=None, body="hello", author_id=None):
+def append(image, *, session, client_id=None, body="hello", author_id=None, sticker_id=None):
     author = session.get(User, author_id or image["user_id"])
     assert author is not None
     return create_document_chat_message(
@@ -34,24 +35,32 @@ def append(image, *, session, client_id=None, body="hello", author_id=None):
         author=author,
         project_id=image["project_id"],
         resource_id=image["resource_id"],
-        message_in=DocumentChatMessageCreate(client_message_id=client_id or uuid4(), body=body),
+        message_in=DocumentChatMessageCreate(
+            client_message_id=client_id or uuid4(), body=body, sticker_id=sticker_id
+        ),
     )
 
 
-def test_concurrent_retry_commits_one_message_and_one_recipient_event(chat_database):
+@pytest.mark.parametrize("sticker_id", [None, "tiny-rpg-love"])
+def test_concurrent_retry_commits_one_message_and_one_recipient_event(chat_database, sticker_id):
     image = chat_database
     barrier = Barrier(2)
     client_id = uuid4()
 
     def send():
         with Session(image["engine"]) as session:
+            session.exec(text("SET TIME ZONE 'Europe/Madrid'"))
             barrier.wait(timeout=10)
-            return append(image, session=session, client_id=client_id)
+            return append(
+                image, session=session, client_id=client_id,
+                body="" if sticker_id else "hello", sticker_id=sticker_id,
+            )
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         futures = [executor.submit(send), executor.submit(send)]
         responses = [future.result(timeout=20) for future in futures]
     assert responses[0].model_dump() == responses[1].model_dump()
+    assert responses[0].sticker_id == sticker_id
     with Session(image["engine"]) as session:
         assert len(session.exec(select(DocumentChatMessage)).all()) == 1
         assert len(session.exec(select(RealtimeEventLog)).all()) == 1
@@ -108,7 +117,10 @@ def test_message_ids_commit_in_order_even_when_first_commit_pauses(chat_database
         assert [message.id for message in page.messages] == [second_message.id]
 
 
-def test_block_commits_before_waiting_chat_rechecks_membership(sharing_database, monkeypatch):
+@pytest.mark.parametrize("sticker_id", [None, "tiny-rpg-love"])
+def test_block_commits_before_waiting_chat_rechecks_membership(
+    sharing_database, monkeypatch, sticker_id
+):
     image = sharing_database
     monkeypatch.setattr(document_chat.realtime_broker, "publish", lambda **_kwargs: None)
     started = Event()
@@ -117,7 +129,10 @@ def test_block_commits_before_waiting_chat_rechecks_membership(sharing_database,
         with Session(image["engine"]) as session:
             started.set()
             try:
-                return append(image, session=session, author_id=image["editor_id"])
+                return append(
+                    image, session=session, author_id=image["editor_id"],
+                    body="" if sticker_id else "hello", sticker_id=sticker_id,
+                )
             except HTTPException as error:
                 session.rollback()
                 return error
