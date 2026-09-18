@@ -1,3 +1,5 @@
+from collections.abc import Generator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from secrets import token_urlsafe
 from uuid import UUID, uuid4
@@ -52,6 +54,7 @@ from app.models import (
     UserPublic,
     UserRegistrationCreate,
     UserUpdate,
+    optional_username,
 )
 from app.realtime import realtime_broker
 from app.time import utc_now
@@ -70,8 +73,8 @@ def normalize_email(email: str) -> str:
     return email.strip().lower()
 
 
-def normalize_username(username: str) -> str:
-    return username.strip().lower()
+def normalize_username(username: str | None) -> str | None:
+    return optional_username(username)
 
 
 def get_user_by_email(*, session: Session, email: str) -> User | None:
@@ -80,8 +83,28 @@ def get_user_by_email(*, session: Session, email: str) -> User | None:
 
 
 def get_user_by_username(*, session: Session, username: str) -> User | None:
-    statement = select(User).where(User.username == normalize_username(username))
+    statement = select(User).where(func.lower(User.username) == func.lower(username))
     return session.exec(statement).first()
+
+
+@contextmanager
+def username_collision_guard(*, session: Session, user: User) -> Generator[None, None, None]:
+    """Translate a concurrent unique-index conflict into the existing API error."""
+    username, user_id = user.username, user.id
+    try:
+        yield
+    except IntegrityError as error:
+        session.rollback()
+        existing = (
+            get_user_by_username(session=session, username=username)
+            if username is not None else None
+        )
+        if existing is not None and existing.id != user_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="A user with this username already exists",
+            ) from error
+        raise
 
 
 def get_project_access_count(*, session: Session, project_id: UUID) -> int:
@@ -307,8 +330,9 @@ def create_user(*, session: Session, user_create: UserCreate) -> User:
         avatar_url=user_create.avatar_url,
         is_admin=False,
     )
-    session.add(user)
-    session.commit()
+    with username_collision_guard(session=session, user=user):
+        session.add(user)
+        session.commit()
     session.refresh(user)
     return user
 
@@ -317,11 +341,18 @@ def upsert_user_from_identity(*, session: Session, user_create: UserCreate) -> U
     user = get_user_by_email(session=session, email=user_create.email)
     if user:
         if user_create.username:
+            existing = get_user_by_username(session=session, username=user_create.username)
+            if existing is not None and existing.id != user.id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="A user with this username already exists",
+                )
             user.username = normalize_username(user_create.username)
         user.avatar_url = user_create.avatar_url
         user.updated_at = utc_now()
-        session.add(user)
-        session.commit()
+        with username_collision_guard(session=session, user=user):
+            session.add(user)
+            session.commit()
         session.refresh(user)
         return user
 
@@ -342,7 +373,7 @@ def create_user_with_password(
     username = normalize_username(user_create.username)
     email = normalize_email(user_create.email)
 
-    if get_user_by_username(session=session, username=username):
+    if username is not None and get_user_by_username(session=session, username=username):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="A user with this username already exists",
@@ -359,15 +390,16 @@ def create_user_with_password(
         email=email,
         is_admin=False,
     )
-    session.add(user)
-    session.flush()
+    with username_collision_guard(session=session, user=user):
+        session.add(user)
+        session.flush()
 
-    password_credential = PasswordCredential(
-        user_id=user.id,
-        password_hash=get_password_hash(user_create.password),
-    )
-    session.add(password_credential)
-    session.commit()
+        password_credential = PasswordCredential(
+            user_id=user.id,
+            password_hash=get_password_hash(user_create.password),
+        )
+        session.add(password_credential)
+        session.commit()
     session.refresh(user)
     return user
 
@@ -421,8 +453,9 @@ def update_current_user(
         ]
 
     current_user.updated_at = utc_now()
-    session.add(current_user)
-    session.commit()
+    with username_collision_guard(session=session, user=current_user):
+        session.add(current_user)
+        session.commit()
     session.refresh(current_user)
     return current_user
 

@@ -2,7 +2,7 @@
 
 from copy import deepcopy
 from unittest.mock import Mock
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import delete
@@ -18,6 +18,7 @@ from app.models import (
     ProjectMember,
     ProjectResource,
     RealtimeEventLog,
+    User,
 )
 
 
@@ -56,8 +57,13 @@ def test_members_including_viewers_can_converse_without_changing_the_drawing(ima
         assert message["created_at"].endswith("Z")
         assert message["project_id"] == str(image["project"].id)
         assert message["resource_id"] == str(image["resource"].id)
-        assert set(message["author"]) == {"id", "username", "avatar_url", "avatar_pixel_art"}
-        assert "email" not in str(message)
+        assert set(message["author"]) == {
+            "id", "username", "display_name", "avatar_url", "avatar_pixel_art",
+        }
+        assert "email" not in message["author"]
+        author = image["session"].get(User, UUID(message["author"]["id"]))
+        assert author is not None
+        assert message["author"]["display_name"] == (author.username or author.email)
         messages.append(message)
     assert read(image, "viewer").json()["messages"] == messages
     image["session"].refresh(image["resource"])
@@ -68,7 +74,7 @@ def test_members_including_viewers_can_converse_without_changing_the_drawing(ima
 
 def test_author_avatar_and_username_are_public_but_email_is_not(image_client):
     image = image_client
-    image["editor"].username = "artist"
+    image["editor"].username = "  Artist 😀 / 東京  "
     image["editor"].avatar_url = "https://example.com/avatar.png"
     image["editor"].avatar_pixel_art = {"version": 1, "pixels": ["#FFFFFF"]}
     image["session"].add(image["editor"])
@@ -76,10 +82,38 @@ def test_author_avatar_and_username_are_public_but_email_is_not(image_client):
     author = send(image, role="editor").json()["author"]
     assert author == {
         "id": str(image["editor"].id),
-        "username": "artist",
+        "username": "  Artist 😀 / 東京  ",
+        "display_name": "  Artist 😀 / 東京  ",
         "avatar_url": "https://example.com/avatar.png",
         "avatar_pixel_art": {"version": 1, "pixels": ["#FFFFFF"]},
     }
+    assert image["editor"].email not in str(author)
+    assert read(image, "viewer").json()["messages"][0]["author"] == author
+    events = image["session"].exec(select(RealtimeEventLog)).all()
+    assert all(event.data["message"]["author"] == author for event in events)
+    assert image["editor"].email not in str([event.data for event in events])
+
+
+@pytest.mark.parametrize("username", [None, "", " \t\n ", "\u2003\u00a0"])
+def test_author_email_is_visible_only_as_blank_name_fallback_in_history_and_realtime(
+    image_client, username, monkeypatch,
+):
+    image = image_client
+    image["editor"].username = username
+    image["session"].add(image["editor"])
+    image["session"].commit()
+    publish = Mock()
+    monkeypatch.setattr(document_chat.realtime_broker, "publish", publish)
+    response = send(image, role="editor")
+    assert response.status_code == 200
+    author = response.json()["author"]
+    assert author["display_name"] == image["editor"].email
+    assert "email" not in author
+    assert read(image, "viewer").json()["messages"][0]["author"] == author
+    events = image["session"].exec(select(RealtimeEventLog)).all()
+    assert len(events) == 3
+    assert all(event.data["message"]["author"] == author for event in events)
+    assert publish.call_args.kwargs["data"]["message"]["author"] == author
 
 
 @pytest.mark.parametrize("sticker_id", [None, "tiny-rpg-love"])

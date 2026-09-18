@@ -90,6 +90,7 @@ class DocumentChatMessageCreate(SQLModel):
 class DocumentChatAuthorPublic(SQLModel):
     id: UUID
     username: str | None = None
+    display_name: str
     avatar_url: str | None = None
     avatar_pixel_art: dict[str, Any] | None = None
 
@@ -128,6 +129,11 @@ def message_to_public(
         author=DocumentChatAuthorPublic(
             id=author.id,
             username=author.username,
+            display_name=(
+                author.username
+                if author.username is not None and author.username.strip()
+                else str(author.email)
+            ),
             avatar_url=author.avatar_url,
             avatar_pixel_art=author.avatar_pixel_art,
         ),

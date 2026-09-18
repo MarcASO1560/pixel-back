@@ -6,7 +6,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from pydantic import ConfigDict, EmailStr, field_serializer, field_validator
-from sqlalchemy import JSON, Column, DateTime, Index, LargeBinary, UniqueConstraint
+from sqlalchemy import JSON, Column, DateTime, Index, LargeBinary, UniqueConstraint, column, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
@@ -25,6 +25,12 @@ PIXEL_ART_PALETTE_ENTRY_NAME_MAX_LENGTH = 64
 PIXEL_ART_COLOR_PATTERN = re.compile(r"^#[0-9A-F]{6}(?:[0-9A-F]{2})?$")
 PIXEL_ART_PALETTE_ENTRY_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$")
 RESOURCE_EDITOR_STATE_MAX_BYTES = 64 * 1024
+USERNAME_MAX_LENGTH = 255
+
+
+def optional_username(username: str | None) -> str | None:
+    """Blank names are absent; every character in a visible name is retained."""
+    return username if username is not None and username.strip() else None
 
 
 class PixelArtPaletteEntry(SQLModel):
@@ -98,7 +104,9 @@ class ProjectAccessRole(StrEnum):
 
 
 class UserBase(SQLModel):
-    username: str | None = Field(default=None, index=True, max_length=40)
+    username: str | None = Field(
+        default=None, index=True, unique=True, max_length=USERNAME_MAX_LENGTH,
+    )
     email: EmailStr = Field(unique=True, index=True, max_length=255)
     avatar_url: str | None = Field(default=None, max_length=2048)
     avatar_pixel_art: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
@@ -107,9 +115,17 @@ class UserBase(SQLModel):
         sa_column=jsonb_column(),
     )
 
+    @field_validator("username", mode="before")
+    @classmethod
+    def blank_username_is_absent(cls, username: object) -> object:
+        return optional_username(username) if isinstance(username, str) else username
+
 
 class User(UserBase, table=True):
     __tablename__ = "users"
+    __table_args__ = (
+        Index("ix_users_username_case_insensitive", func.lower(column("username")), unique=True),
+    )
 
     id: UUID = Field(default_factory=uuid4, primary_key=True)
     is_admin: bool = False
@@ -122,23 +138,17 @@ class UserCreate(UserBase):
 
 
 class UserUpdate(SQLModel):
-    username: str | None = Field(default=None, min_length=3, max_length=40)
+    username: str | None = Field(default=None, max_length=USERNAME_MAX_LENGTH)
     avatar_pixel_art: dict[str, Any] | None = None
     pixel_art_palette: list[PixelArtPaletteEntry] = Field(
         default_factory=list,
         max_length=PIXEL_ART_PALETTE_MAX_ENTRIES,
     )
 
-    @field_validator("username")
+    @field_validator("username", mode="before")
     @classmethod
-    def validate_username(cls, username: str | None) -> str | None:
-        if username is None:
-            return username
-        if not username.translate(str.maketrans("", "", "_.-")).isalnum():
-            raise ValueError(
-                "Username can only contain letters, numbers, dots, hyphens, and underscores",
-            )
-        return username
+    def blank_username_is_absent(cls, username: object) -> object:
+        return optional_username(username) if isinstance(username, str) else username
 
     @field_validator("pixel_art_palette")
     @classmethod
@@ -166,19 +176,15 @@ class EmailPasswordSessionCreate(SQLModel):
 
 
 class UserRegistrationCreate(SQLModel):
-    username: str = Field(min_length=3, max_length=40)
+    username: str | None = Field(default=None, max_length=USERNAME_MAX_LENGTH)
     email: EmailStr
     password: str = Field(min_length=8, max_length=128)
     password_confirmation: str = Field(min_length=8, max_length=128)
 
-    @field_validator("username")
+    @field_validator("username", mode="before")
     @classmethod
-    def validate_username(cls, username: str) -> str:
-        if not username.translate(str.maketrans("", "", "_.-")).isalnum():
-            raise ValueError(
-                "Username can only contain letters, numbers, dots, hyphens, and underscores",
-            )
-        return username
+    def blank_username_is_absent(cls, username: object) -> object:
+        return optional_username(username) if isinstance(username, str) else username
 
 
 class PasswordResetRequestCreate(SQLModel):

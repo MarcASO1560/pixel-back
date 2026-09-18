@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
+from app import crud
 from app.api.deps import get_db
 from app.api.routes import login as login_route
 from app.core import email as email_service
@@ -197,12 +198,16 @@ def test_register_with_password_creates_session() -> None:
         )
 
         assert me_response.status_code == 200
-        assert me_response.json()["username"] == "sefkira"
+        assert me_response.json()["username"] == "Sefkira"
         assert me_response.json()["email"] == "user@example.com"
 
 
-@pytest.mark.parametrize("username", ["Dr.Maraka.exe", "Pixel-Artist"])
-def test_register_and_update_accept_usernames_with_dots_and_hyphens(username: str) -> None:
+@pytest.mark.parametrize(
+    "username",
+    ["Dr.Maraka.exe", "Pixel-Artist", "Pixel Artist", "Artist@Name", "_.-", "A", "😀",
+     "  María 🌈 / 東京  ", "A" * 255, "😀" * 255],
+)
+def test_register_and_update_preserve_free_profile_names(username: str) -> None:
     with create_auth_client() as (client, _session):
         response = client.post(
             "/api/v1/auth/register",
@@ -216,25 +221,22 @@ def test_register_and_update_accept_usernames_with_dots_and_hyphens(username: st
 
         assert response.status_code == 200
         headers = {"Authorization": f"Bearer {response.json()['access_token']}"}
-        assert client.get("/api/v1/users/me", headers=headers).json()["username"] == (
-            username.lower()
-        )
+        assert client.get("/api/v1/users/me", headers=headers).json()["username"] == username
+        renamed = username[::-1]
 
         update_response = client.patch(
             "/api/v1/users/me",
             headers=headers,
-            json={"username": f"New.{username}-01"},
+            json={"username": renamed},
         )
 
         assert update_response.status_code == 200
-        assert update_response.json()["username"] == f"new.{username.lower()}-01"
-        assert client.get("/api/v1/users/me", headers=headers).json()["username"] == (
-            f"new.{username.lower()}-01"
-        )
+        assert update_response.json()["username"] == renamed
+        assert client.get("/api/v1/users/me", headers=headers).json()["username"] == renamed
 
 
-@pytest.mark.parametrize("username", ["Pixel Artist", "Artist@Name", "_.-"])
-def test_register_and_update_explain_invalid_username_characters(username: str) -> None:
+@pytest.mark.parametrize("username", ["A" * 256, "😀" * 256, 7, {}, []])
+def test_register_and_update_reject_nontext_or_overlong_names(username: object) -> None:
     with create_auth_client() as (client, _session):
         registration = {
             "username": username,
@@ -259,9 +261,8 @@ def test_register_and_update_explain_invalid_username_characters(username: str) 
             assert response.status_code == 422
             error = response.json()["detail"][0]
             assert error["loc"] == ["body", "username"]
-            assert error["msg"] == (
-                "Value error, Username can only contain letters, numbers, dots, "
-                "hyphens, and underscores"
+            assert error["type"] == (
+                "string_too_long" if isinstance(username, str) else "string_type"
             )
 
         assert client.get("/api/v1/users/me", headers=headers).json()["username"] == (
@@ -269,10 +270,11 @@ def test_register_and_update_explain_invalid_username_characters(username: str) 
         )
 
 
-def test_register_and_update_reject_case_normalized_username_collisions() -> None:
+@pytest.mark.parametrize("legacy_name", ["Dr.Maraka-exe", "dr.maraka-exe"])
+def test_register_and_update_reject_case_insensitive_username_collisions(legacy_name) -> None:
     with create_auth_client() as (client, _session):
         registration = {
-            "username": "Dr.Maraka-exe",
+            "username": legacy_name,
             "email": "first-name@example.com",
             "password": "secret-pass",
             "password_confirmation": "secret-pass",
@@ -300,6 +302,80 @@ def test_register_and_update_reject_case_normalized_username_collisions() -> Non
         assert client.get("/api/v1/users/me", headers=headers).json()["username"] == (
             "other_name"
         )
+
+
+@pytest.mark.parametrize("username", [None, "", " \t\n ", "\u2003\u00a0"])
+def test_blank_names_are_optional_and_do_not_prevent_independent_avatar_edits(username) -> None:
+    with create_auth_client() as (client, session):
+        registration = {
+            "username": username, "email": "blank-name@example.com",
+            "password": "secret-pass", "password_confirmation": "secret-pass",
+        }
+        response = client.post("/api/v1/auth/register", json=registration)
+        assert response.status_code == 200
+        headers = {"Authorization": f"Bearer {response.json()['access_token']}"}
+        assert client.get("/api/v1/users/me", headers=headers).json()["username"] is None
+        avatar = {"version": 1, "size": 16, "pixels": ["#000000", None]}
+        response = client.patch(
+            "/api/v1/users/me", headers=headers, json={"avatar_pixel_art": avatar},
+        )
+        assert response.status_code == 200
+        assert response.json()["username"] is None
+        assert response.json()["avatar_pixel_art"] == avatar
+        client.patch("/api/v1/users/me", headers=headers, json={"username": "  A 😀  "})
+        response = client.patch(
+            "/api/v1/users/me", headers=headers, json={"avatar_pixel_art": None},
+        )
+        assert response.status_code == 200
+        assert response.json()["username"] == "  A 😀  "
+        response = client.patch("/api/v1/users/me", headers=headers, json={"username": username})
+        assert response.status_code == 200
+        assert response.json()["username"] is None
+        assert session.exec(select(User)).one().username is None
+        # Another absent name is not a collision, whether omitted or explicitly blank.
+        registration.pop("username")
+        registration["email"] = "omitted-name@example.com"
+        assert client.post("/api/v1/auth/register", json=registration).status_code == 200
+
+
+@pytest.mark.parametrize("operation", ["register", "rename"])
+def test_atomic_case_insensitive_conflicts_return_profile_error(operation, monkeypatch) -> None:
+    with create_auth_client() as (client, session):
+        session.add(User(username="Existing Name 😀", email="existing-name@example.com"))
+        session.commit()
+        registration = {
+            "username": "original", "email": "racing-name@example.com",
+            "password": "secret-pass", "password_confirmation": "secret-pass",
+        }
+        headers = None
+        if operation == "rename":
+            token = client.post("/api/v1/auth/register", json=registration).json()["access_token"]
+            headers = {"Authorization": f"Bearer {token}"}
+        original_lookup = crud.get_user_by_username
+        lookups = 0
+
+        def concurrent_name_is_not_visible_to_precheck(**kwargs):
+            nonlocal lookups
+            lookups += 1
+            return None if lookups == 1 else original_lookup(**kwargs)
+
+        monkeypatch.setattr(
+            crud, "get_user_by_username", concurrent_name_is_not_visible_to_precheck,
+        )
+        if operation == "register":
+            registration["username"] = "EXISTING NAME 😀"
+            response = client.post("/api/v1/auth/register", json=registration)
+            assert crud.get_user_by_email(session=session, email=registration["email"]) is None
+        else:
+            response = client.patch(
+                "/api/v1/users/me", headers=headers,
+                json={"username": "EXISTING NAME 😀", "avatar_pixel_art": {"pixels": []}},
+            )
+            me = client.get("/api/v1/users/me", headers=headers).json()
+            assert me["username"] == "original"
+            assert me["avatar_pixel_art"] is None
+        assert response.status_code == 400
+        assert response.json() == {"detail": "A user with this username already exists"}
 
 
 def test_current_user_can_update_profile_and_pixel_avatar() -> None:
