@@ -6,7 +6,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from pydantic import ConfigDict, EmailStr, field_serializer, field_validator
-from sqlalchemy import JSON, Column, DateTime, LargeBinary, UniqueConstraint
+from sqlalchemy import JSON, Column, DateTime, Index, LargeBinary, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
@@ -397,6 +397,29 @@ class RealtimeEventLog(SQLModel, table=True):
     event: str = Field(max_length=80, index=True)
     data: dict[str, Any] = Field(default_factory=dict, sa_column=jsonb_column())
     created_at: datetime = Field(default_factory=utc_now, index=True)
+
+
+class DocumentChatMessage(SQLModel, table=True):
+    """Append-only document conversation, independent from drawing revisions."""
+
+    __tablename__ = "document_chat_messages"
+    __table_args__ = (
+        UniqueConstraint(
+            "resource_id", "author_id", "client_message_id", name="uq_document_chat_client_message"
+        ),
+        Index("ix_document_chat_messages_resource_id_id", "resource_id", "id"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    project_id: UUID = Field(foreign_key="projects.id", ondelete="CASCADE", index=True)
+    resource_id: UUID = Field(foreign_key="project_resources.id", ondelete="CASCADE", index=True)
+    author_id: UUID = Field(foreign_key="users.id", ondelete="CASCADE", index=True)
+    client_message_id: UUID
+    body: str = Field(min_length=1, max_length=2000)
+    created_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
 
 
 class ProjectFolderBase(SQLModel):
